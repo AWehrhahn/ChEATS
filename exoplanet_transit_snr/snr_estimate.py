@@ -10,7 +10,6 @@ from cats.simulator.detector import Crires
 from cats.spectrum import SpectrumArray
 from exoorbit.orbit import Orbit
 from scipy.interpolate import interp1d
-from skimage import transform as tf
 from tqdm import tqdm
 
 from .stats import cohen_d, gauss, gaussfit
@@ -22,12 +21,6 @@ from .stats import cohen_d, gauss, gaussfit
 # - Tests for all the steps
 # - Refactoring of the steps, a lot of the code is strewm all over the place
 # - Determine Uncertainties for each point
-
-
-def shear(x, shear=1, inplace=False):
-    afine_tf = tf.AffineTransform(shear=shear)
-    modified = tf.warp(x, inverse_map=afine_tf)
-    return modified
 
 
 def init_cats(star, planet, dataset, rv_step=0.25, rv_range=200):
