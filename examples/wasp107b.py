@@ -12,22 +12,7 @@ datasets = {50: "WASP-107b_SNR50", 100: "WASP-107b_SNR100", 200: "WASP-107b_SNR2
 filename = "cohends.npz"
 if not exists(filename):
     ds = {}
-    for sysrem in [
-        "0",
-        "1",
-        "2",
-        "3",
-        "4",
-        "5",
-        "6",
-        "7",
-        "8",
-        "9",
-        "7.0",
-        "7.1",
-        "7.2",
-        "7.3",
-    ]:
+    for sysrem in "3 4 5 6 7 8 9".split():
         for snr, dataset in datasets.items():
             ds[f"{sysrem}_{snr}"] = calculate_cohen_d_for_dataset(
                 star, planet, dataset, sysrem=str(sysrem), plot=False
