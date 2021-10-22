@@ -321,28 +321,3 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
         plt.show()
 
     return d
-
-
-# init_cats("L_98-59", "c", "L98-59c_HotJup_SNR100")
-# datasets = {100: "L98-59c_HotJup_SNR100"}
-# d = calculate_cohen_d_for_dataset("L 98-59", "c", "L98-59c_HotJup_SNR100", "7")
-
-star, planet = "LTT1445A", "b"
-datasets = {
-    50: "LTT1445Ab_SNR50_EarthAtmosphere",
-    100: "LTT1445Ab_SNR100_EarthAtmosphere",
-    200: "LTT1445Ab_SNR200_EarthAtmosphere",
-}
-
-# init_cats(star, planet, datasets[50])
-for snr in [50, 100, 200]:
-    d = calculate_cohen_d_for_dataset(star, planet, datasets[snr], "7.1", plot=True)
-
-# star, planet = "WASP-107", "b"
-# datasets = {50: "WASP-107b_SNR50", 100: "WASP-107b_SNR100", 200: "WASP-107b_SNR200"}
-
-# # # init_cats(star, planet, datasets[50])
-# d = calculate_cohen_d_for_dataset(star, planet, datasets[100], "7")
-
-print(d)
-pass
