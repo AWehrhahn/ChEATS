@@ -15,7 +15,7 @@ repos:
     # Python checks
     -   id: check-docstring-first
     -   id: debug-statements
-    -   id: requirements-txt-fixer
+    # -   id: requirements-txt-fixer
     -   id: fix-encoding-pragma
     -   id: fix-byte-order-marker
     # General checks
