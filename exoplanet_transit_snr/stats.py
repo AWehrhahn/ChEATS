@@ -12,7 +12,7 @@ def welch_t(a, b, ua=None, ub=None):
 
     xa = a.mean()
     xb = b.mean()
-    t = (xa - xb) / np.sqrt(ua ** 2 + ub ** 2)
+    t = np.abs(xa - xb) / np.sqrt(ua ** 2 + ub ** 2)
     return t
 
 

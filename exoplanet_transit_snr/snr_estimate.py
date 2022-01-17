@@ -23,17 +23,30 @@ from .stats import cohen_d, gauss, gaussfit
 # - Determine Uncertainties for each point
 
 
-def init_cats(star, planet, dataset, rv_step=0.25, rv_range=200):
-    # Detector
-    setting = "K/2/4"
-    detectors = [1, 2, 3]
-    orders = [7, 6, 5, 4, 3, 2]
+def get_detector(setting="K/2/4", detectors=(1, 2, 3), orders=(7, 6, 5, 4, 3, 2)):
     detector = Crires(setting, detectors, orders=orders)
+    return detector
+
+
+def init_cats(
+    star,
+    planet,
+    dataset,
+    rv_step=0.25,
+    rv_range=200,
+    base_dir=None,
+    raw_dir="Spectrum_00",
+    detector=None,
+):
+    # Detector
+    if detector is None:
+        detector = get_detector()
 
     # Initialize the CATS runner
-    dataset_dir = join(dirname(__file__), "../datasets")
-    base_dir = join(dataset_dir, dataset)
-    raw_dir = join(base_dir, "Spectrum_00")
+    if base_dir is None:
+        dataset_dir = join(dirname(__file__), "../datasets")
+        base_dir = join(dataset_dir, dataset)
+    raw_dir = join(base_dir, raw_dir)
     medium_dir = join(base_dir, "medium")
     done_dir = join(base_dir, "done")
     runner = CatsRunner(
@@ -114,19 +127,19 @@ def create_dataset(star, planet, datasets, plot=True):
     return datasets
 
 
-def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
-    runner = init_cats(star, planet, dataset)
+def run_cross_correlation(runner, load=True):
+    runner.run_module("planet_reference_spectrum", load=load)
+    runner.run_module("cross_correlation_reference", load=load)
+    data = runner.run_module("cross_correlation", load=load)
+    return data
+
+
+def calculate_cohen_d_for_dataset(runner, sysrem="7", plot=True, title=""):
     planet = runner.planet
     star = runner.star
 
-    try:
-        runner.run_module("cross_correlation_reference", load=True)
-        data = runner.run_module("cross_correlation", load=True)
-    except FileNotFoundError:
-        runner.run_module("cross_correlation_reference", load=False)
-        data = runner.run_module("cross_correlation", load=False)
-
     spectra = runner.data["spectra"]
+    data = runner.data["cross_correlation"]
 
     datetime = spectra.datetime
     phi = (datetime - planet.time_of_transit) / planet.period
@@ -137,6 +150,10 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
     vsys = star.radial_velocity.to_value("km/s")
     kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
     vp = vsys + kp * np.sin(2 * np.pi * phi)
+
+    ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    in_transit = (phi >= ingress) | (phi <= egress)
 
     data = data[str(sysrem)]
     config = runner.configuration["cross_correlation"]
@@ -149,11 +166,28 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
     if plot:
         plt.imshow(data, aspect="auto", origin="lower")
         plt.xlabel("rv [km/s]")
+        plt.ylabel("#Obs")
         xticks = plt.xticks()[0][1:-1]
         xticks_labels = np.interp(xticks, np.arange(len(rv)), rv)
         xticks_labels = [f"{x:.3g}" for x in xticks_labels]
         plt.xticks(xticks, labels=xticks_labels)
         plt.plot(vp_idx, np.arange(data.shape[0]), "r-.", alpha=0.5)
+        plt.hlines(
+            np.arange(data.shape[0])[in_transit][0],
+            -0.5,
+            data.shape[1] + 0.5,
+            "k",
+            "--",
+        )
+        plt.hlines(
+            np.arange(data.shape[0])[in_transit][-1],
+            -0.5,
+            data.shape[1] + 0.5,
+            "k",
+            "--",
+        )
+        plt.xlim(-0.5, data.shape[1] + 0.5)
+        plt.title(title)
         plt.show()
 
     vsys_min, vsys_max = int(vsys) - 20, int(vsys) + 20
@@ -167,7 +201,7 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
             vp = vs + k * np.sin(2 * np.pi * phi)
             # shifted = [np.interp(vp[i], rv, data[i], left=np.nan, right=np.nan) for i in range(len(vp))]
             shifted = np.diag(interpolator(vp))
-            combined[j, i] = np.nansum(shifted)
+            combined[j, i] = np.nansum(shifted[in_transit])
 
     # Normalize to the number of input spectra
     combined /= data.shape[0]
@@ -230,7 +264,62 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
             kp_popt = None
             break
 
+    # vsys_width = int(np.ceil(vsys_width))
+    # kp_width = int(np.ceil(kp_width))
+    vsys_width = int(2 / rv_step)  # +-2 km/s
+    kp_width = int(20 / rv_step)  # +-10 km/s
+
     if plot:
+        vsys_peak_low = vsys[max(vsys_peak - vsys_width, 0)]
+        vsys_peak_upp = vsys[min(vsys_peak + vsys_width, len(vsys) - 1)]
+        kp_peak_low = kp[max(kp_peak - kp_width, 0)]
+        kp_peak_upp = kp[min(kp_peak + kp_width, len(kp) - 1)]
+
+        vp_new = vsys[vsys_peak] + kp[kp_peak] * np.sin(2 * np.pi * phi)
+        vp_low_low = vsys_peak_low + kp_peak_low * np.sin(2 * np.pi * phi)
+        vp_low_upp = vsys_peak_low + kp_peak_upp * np.sin(2 * np.pi * phi)
+        vp_upp_low = vsys_peak_upp + kp_peak_low * np.sin(2 * np.pi * phi)
+        vp_upp_upp = vsys_peak_upp + kp_peak_upp * np.sin(2 * np.pi * phi)
+        vp_low = np.min([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
+        vp_upp = np.max([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
+
+        vp_idx_new = np.interp(vp_new, rv, np.arange(rv.size))
+        vp_idx_low = np.interp(vp_low, rv, np.arange(rv.size))
+        vp_idx_upp = np.interp(vp_upp, rv, np.arange(rv.size))
+
+        plt.imshow(data, aspect="auto", origin="lower")
+        plt.xlabel("rv [km/s]")
+        xticks = plt.xticks()[0][1:-1]
+        xticks_labels = np.interp(xticks, np.arange(len(rv)), rv)
+        xticks_labels = [f"{x:.3g}" for x in xticks_labels]
+        plt.xticks(xticks, labels=xticks_labels)
+        plt.plot(vp_idx, np.arange(data.shape[0]), "r-.")
+        plt.plot(vp_idx_new, np.arange(data.shape[0]), "k-.")
+        plt.hlines(
+            np.arange(data.shape[0])[in_transit][0],
+            -0.5,
+            data.shape[1] + 0.5,
+            "k",
+            "--",
+        )
+        plt.hlines(
+            np.arange(data.shape[0])[in_transit][-1],
+            -0.5,
+            data.shape[1] + 0.5,
+            "k",
+            "--",
+        )
+        plt.fill_betweenx(
+            np.arange(data.shape[0]),
+            vp_idx_low,
+            vp_idx_upp,
+            color="tab:orange",
+            alpha=0.5,
+        )
+        plt.xlim(-0.5, data.shape[1] + 0.5)
+        plt.title(title)
+        plt.show()
+
         # Plot the results
         ax = plt.subplot(121)
         plt.imshow(combined, aspect="auto", origin="lower")
@@ -270,12 +359,12 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
             plt.plot(kp, gauss(kp, *kp_popt), "r--")
         plt.xlabel("Kp [km/s]")
 
-        plt.suptitle(dataset)
+        plt.suptitle(title)
         plt.show()
 
     # Have to check that this makes sense
-    vsys_width = int(np.ceil(vsys_width))
-    kp_width = int(np.ceil(kp_width))
+    vsys_width = int(2 / rv_step)  # +-2 km/s
+    kp_width = int(20 / rv_step)  # +-10 km/s
 
     mask = np.full(combined.shape, False)
     kp_low = max(0, kp_peak - kp_width)
@@ -300,17 +389,17 @@ def calculate_cohen_d_for_dataset(star, planet, dataset, sysrem="7", plot=True):
             bins=hbins,
             density=True,
             histtype="step",
-            label="in transit",
+            label="in-trail",
         )
         plt.hist(
             out_trail.ravel(),
             bins=hbins,
             density=True,
             histtype="step",
-            label="out of transit",
+            label="out-of-trail",
         )
         plt.legend()
-        plt.title(f"{dataset}\nCohen d: {d}")
+        plt.title(f"{title}\nCohen d: {d}")
         plt.show()
 
     return d

@@ -10,24 +10,28 @@ from exoplanet_transit_snr.snr_estimate import (
     run_cross_correlation,
 )
 
-star, planet = "WASP-107", "b"
-datasets = {50: "WASP-107b_SNR50", 100: "WASP-107b_SNR100", 200: "WASP-107b_SNR200"}
+star, planet = "GJ 357", "b"
+datasets = {
+    50: "GJ357b_SNR50_EarthAtmosphere",
+    100: "GJ357b_SNR100_EarthAtmosphere",
+    200: "GJ357b_SNR200_EarthAtmosphere",
+}
 
 for snr in [50, 100, 200]:
-    runner = init_cats(star, planet, datasets[snr])
+    runner = init_cats(star, planet, datasets[snr], raw_dir="Spectrum_02")
     runner.configuration["planet_reference_spectrum"]["method"] = "petitRADTRANS"
-    data = run_cross_correlation(runner, load=False)
+    data = run_cross_correlation(runner, load=True)
     d = calculate_cohen_d_for_dataset(
-        runner, sysrem="5", plot=False, title=f"{star} {planet} SNR{snr}"
+        runner, sysrem="5", plot=True, title=f"{star} {planet} SNR{snr}"
     )
-
+pass
 # filename = "cohends.npz"
 # if not exists(filename):
 #     ds = {}
-#     for sysrem in "3 4 5 6 7 8 9".split():
+#     for sysrem in ["4.1"]: #"3 4 5 6 7 8 9".split():
 #         for snr, dataset in datasets.items():
 #             ds[f"{sysrem}_{snr}"] = calculate_cohen_d_for_dataset(
-#                 star, planet, dataset, sysrem=str(sysrem), plot=False
+#                 runner, sysrem=str(sysrem), plot=True
 #             )
 #     np.savez("cohends.npz", **ds)
 # else:
