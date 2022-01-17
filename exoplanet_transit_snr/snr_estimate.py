@@ -128,8 +128,8 @@ def create_dataset(star, planet, datasets, plot=True):
 
 
 def run_cross_correlation(runner, load=True):
-    runner.run_module("planet_reference_spectrum", load=load)
-    runner.run_module("cross_correlation_reference", load=load)
+    # runner.run_module("planet_reference_spectrum", load=load)
+    # runner.run_module("cross_correlation_reference", load=load)
     data = runner.run_module("cross_correlation", load=load)
     return data
 
