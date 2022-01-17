@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
-    name="flex-format",
+    name="exoplanet_transit_snr",
     url="https://github.com/AWehrhahn/exoplanet_transit_snr",
     author="Ansgar Wehrhahn",
     author_email="ansgar.wehrhahn@physics.uu.se",
