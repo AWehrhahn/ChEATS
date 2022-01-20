@@ -6,7 +6,6 @@ import numpy as np
 
 from exoplanet_transit_snr.snr_estimate import (
     calculate_cohen_d_for_dataset,
-    init_cats,
     load_data,
     run_cross_correlation,
 )
@@ -26,7 +25,7 @@ for snr in [200]:
     data_dir = join(dirname(__file__), "../datasets", datasets[snr], "Spectrum_00")
     data = load_data(data_dir, load=True)
     cc_data = run_cross_correlation(
-        data, rv_range=rv_range, rv_step=rv_step, load=False, data_dir=data_dir
+        data, rv_range=rv_range, rv_step=rv_step, load=True, data_dir=data_dir
     )
     d = calculate_cohen_d_for_dataset(
         data,
