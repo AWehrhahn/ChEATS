@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
+from glob import glob
 from os import makedirs
-from os.path import dirname, join, realpath
+from os.path import basename, dirname, join, realpath
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from astropy import units as u
+from astropy.constants import c
+from astropy.io import fits
 from astropy.time import Time
-from cats.extractor.runner import CatsRunner
-from cats.simulator.detector import Crires
-from cats.spectrum import SpectrumArray
+
+# from cats.extractor.runner import CatsRunner
+# from cats.simulator.detector import Crires
+# from cats.spectrum import SpectrumArray
 from exoorbit.orbit import Orbit
+from genericpath import exists
 from scipy.interpolate import interp1d
 from tqdm import tqdm
 
 from .stats import cohen_d, gauss, gaussfit
+from .sysrem import sysrem
 
 # TODO List:
 # - automatically mask points before fitting with SME
@@ -23,125 +31,207 @@ from .stats import cohen_d, gauss, gaussfit
 # - Determine Uncertainties for each point
 
 
-def get_detector(setting="K/2/4", detectors=(1, 2, 3), orders=(7, 6, 5, 4, 3, 2)):
-    detector = Crires(setting, detectors, orders=orders)
-    return detector
+# def get_detector(setting="K/2/4", detectors=(1, 2, 3), orders=(7, 6, 5, 4, 3, 2)):
+#     detector = Crires(setting, detectors, orders=orders)
+#     return detector
 
 
-def init_cats(
+# def init_cats(
+#     star,
+#     planet,
+#     dataset,
+#     rv_step=0.25,
+#     rv_range=200,
+#     base_dir=None,
+#     raw_dir="Spectrum_00",
+#     detector=None,
+# ):
+#     # Detector
+#     if detector is None:
+#         detector = get_detector()
+
+#     # Initialize the CATS runner
+#     if base_dir is None:
+#         dataset_dir = join(dirname(__file__), "../datasets")
+#         base_dir = join(dataset_dir, dataset)
+#     raw_dir = join(base_dir, raw_dir)
+#     medium_dir = join(base_dir, "medium")
+#     done_dir = join(base_dir, "done")
+#     runner = CatsRunner(
+#         detector,
+#         star,
+#         planet,
+#         None,
+#         base_dir=base_dir,
+#         raw_dir=raw_dir,
+#         medium_dir=medium_dir,
+#         done_dir=done_dir,
+#     )
+#     # Set the radial velocity step size
+#     rv_points = int((2 * rv_range + 1) / rv_step)
+#     runner.configuration["cross_correlation"]["rv_range"] = rv_range
+#     runner.configuration["cross_correlation"]["rv_points"] = rv_points
+#     runner.configuration["cross_correlation_reference"]["rv_range"] = rv_range
+#     runner.configuration["cross_correlation_reference"]["rv_points"] = rv_points
+
+#     # # Override data with known information
+#     # star = runner.star
+#     # planet = runner.planet
+#     return runner
+
+
+# def create_dataset(star, planet, datasets, plot=True):
+
+#     data = []
+#     snrs = []
+#     for snr_local, dataset in datasets.items():
+#         runner = init_cats(star, planet, dataset)
+#         spectra = runner.run_module("spectra", load=True)
+#         data += [spectra]
+#         snrs += [snr_local]
+
+#     result = []
+#     new_snrs = []
+#     for i in range(len(data)):
+#         # TODO: combine observations from different datasets
+#         j = i
+#         # snr_i, snr_j = snrs[i], snrs[j]
+#         data_i, data_j = data[i], data[j]
+
+#         new_snr = np.sqrt(snrs[i] ** 2 + snrs[j] ** 2)
+#         if len(data_i) == len(data_j):
+#             n = (len(data_i) // 2) * 2
+#             new_data = data_i.flux[:n:2] + data_j.flux[1:n:2]
+#             new_wave = data_i.wavelength[:n:2]
+#             new_time = (data_i.datetime[:n:2].mjd + data_j.datetime[1:n:2].mjd) / 2
+#             new_time = Time(new_time, format="mjd")
+#             new_segments = data_i.segments
+#         else:
+#             # This should not happen (yet)
+#             pass
+
+#         arr = SpectrumArray(
+#             flux=new_data, spectral_axis=new_wave, segments=new_segments
+#         )
+#         arr.datetime = new_time
+
+#         new_snrs += [new_snr]
+#         result += [arr]
+
+#     datasets = {}
+#     for snr, arr in zip(new_snrs, result):
+#         dataset = f"WASP-107b_SNR{int(snr)}"
+#         base_dir = realpath(join(dirname(__file__), f"../datasets/{dataset}"))
+#         raw_dir = join(base_dir, "Spectrum_00")
+#         medium_dir = join(base_dir, "medium")
+#         done_dir = join(base_dir, "done")
+#         makedirs(raw_dir, exist_ok=True)
+#         makedirs(medium_dir, exist_ok=True)
+#         makedirs(done_dir, exist_ok=True)
+#         # arr = SpectrumArray(arr)
+#         arr.write(join(medium_dir, "spectra.flex"))
+#         datasets[int(snr)] = dataset
+
+#     return datasets
+
+
+def run_cross_correlation(
+    data,
+    max_nsysrem=10,
+    max_nsysrem_after=3,
+    rv_range=100,
+    rv_step=1,
+    skip=None,
+    load=False,
+    data_dir=None,
+):
+    wave, flux, uncs, times, segments = data
+    rv_points = int(2 * rv_range / rv_step + 1)
+
+    if data_dir is not None:
+        savefilename = join(data_dir, "../medium/cross_correlation.npz")
+        if load and exists(savefilename):
+            data = np.load(savefilename)
+            return data
+
+    skip_mask = np.full(flux.shape[1], True)
+    if skip is not None:
+        for seg in skip:
+            skip_mask[segments[seg] : segments[seg + 1]] = False
+
+    # reference = cross_correlation_reference
+    flux = flux
+    if uncs is None:
+        uncs = np.ones_like(flux)
+
+    correlation = {}
+    for n in tqdm(range(max_nsysrem), desc="Sysrem N"):
+        corrected_flux = sysrem(flux, num_errors=n, errors=uncs)
+
+        # Normalize by the standard deviation in this wavelength column
+        std = np.nanstd(corrected_flux, axis=0)
+        std[std == 0] = 1
+        corrected_flux /= std
+
+        # reference_flux = np.copy(reference.flux.to_value(1))
+        # reference_flux -= np.nanmean(reference_flux, axis=1)[:, None]
+        # reference_flux /= np.nanstd(reference_flux, axis=1)[:, None]
+        wave_noshift = wave[0]
+        c_light = c.to_value("km/s")
+
+        # Run the cross correlation for all times and radial velocity offsets
+        corr = np.zeros((flux.shape[0], int(rv_points)))
+        for i in tqdm(range(flux.shape[0] - 1), leave=False, desc="Observation"):
+            for j in tqdm(
+                range(rv_points),
+                leave=False,
+                desc="radial velocity",
+            ):
+                # Doppler Shift the next spectrum
+                rv = -rv_range + j * rv_step
+                wave_shift = wave_noshift * (1 + rv / c_light)
+                newspectra = np.interp(wave_shift, wave_noshift, corrected_flux[i + 1])
+
+                # Mask bad pixels
+                m = np.isfinite(corrected_flux[i])
+                m &= np.isfinite(newspectra[i + 1])
+                m &= skip_mask
+
+                # Cross correlate!
+                corr[i, j] += np.correlate(
+                    corrected_flux[i][m],
+                    newspectra[m],
+                    "valid",
+                )
+                # Normalize to the number of data points used
+                corr[i, j] *= m.size / np.count_nonzero(m)
+
+        correlation[f"{n}"] = np.copy(corr)
+        for i in tqdm(
+            range(max_nsysrem_after),
+            leave=False,
+            desc="Sysrem on Cross Correlation",
+        ):
+            correlation[f"{n}.{i}"] = sysrem(np.copy(corr), i)
+
+    if data_dir is not None:
+        np.savez(savefilename, **correlation)
+    return correlation
+
+
+def calculate_cohen_d_for_dataset(
+    spectra,
+    data,
     star,
     planet,
-    dataset,
-    rv_step=0.25,
-    rv_range=200,
-    base_dir=None,
-    raw_dir="Spectrum_00",
-    detector=None,
+    rv_range=100,
+    rv_step=1,
+    sysrem="7",
+    plot=True,
+    title="",
 ):
-    # Detector
-    if detector is None:
-        detector = get_detector()
+    wave, flux, uncs, datetime, segments = spectra
 
-    # Initialize the CATS runner
-    if base_dir is None:
-        dataset_dir = join(dirname(__file__), "../datasets")
-        base_dir = join(dataset_dir, dataset)
-    raw_dir = join(base_dir, raw_dir)
-    medium_dir = join(base_dir, "medium")
-    done_dir = join(base_dir, "done")
-    runner = CatsRunner(
-        detector,
-        star,
-        planet,
-        None,
-        base_dir=base_dir,
-        raw_dir=raw_dir,
-        medium_dir=medium_dir,
-        done_dir=done_dir,
-    )
-    # Set the radial velocity step size
-    rv_points = int((2 * rv_range + 1) / rv_step)
-    runner.configuration["cross_correlation"]["rv_range"] = rv_range
-    runner.configuration["cross_correlation"]["rv_points"] = rv_points
-    runner.configuration["cross_correlation_reference"]["rv_range"] = rv_range
-    runner.configuration["cross_correlation_reference"]["rv_points"] = rv_points
-
-    # # Override data with known information
-    # star = runner.star
-    # planet = runner.planet
-    return runner
-
-
-def create_dataset(star, planet, datasets, plot=True):
-
-    data = []
-    snrs = []
-    for snr_local, dataset in datasets.items():
-        runner = init_cats(star, planet, dataset)
-        spectra = runner.run_module("spectra", load=True)
-        data += [spectra]
-        snrs += [snr_local]
-
-    result = []
-    new_snrs = []
-    for i in range(len(data)):
-        # TODO: combine observations from different datasets
-        j = i
-        # snr_i, snr_j = snrs[i], snrs[j]
-        data_i, data_j = data[i], data[j]
-
-        new_snr = np.sqrt(snrs[i] ** 2 + snrs[j] ** 2)
-        if len(data_i) == len(data_j):
-            n = (len(data_i) // 2) * 2
-            new_data = data_i.flux[:n:2] + data_j.flux[1:n:2]
-            new_wave = data_i.wavelength[:n:2]
-            new_time = (data_i.datetime[:n:2].mjd + data_j.datetime[1:n:2].mjd) / 2
-            new_time = Time(new_time, format="mjd")
-            new_segments = data_i.segments
-        else:
-            # This should not happen (yet)
-            pass
-
-        arr = SpectrumArray(
-            flux=new_data, spectral_axis=new_wave, segments=new_segments
-        )
-        arr.datetime = new_time
-
-        new_snrs += [new_snr]
-        result += [arr]
-
-    datasets = {}
-    for snr, arr in zip(new_snrs, result):
-        dataset = f"WASP-107b_SNR{int(snr)}"
-        base_dir = realpath(join(dirname(__file__), f"../datasets/{dataset}"))
-        raw_dir = join(base_dir, "Spectrum_00")
-        medium_dir = join(base_dir, "medium")
-        done_dir = join(base_dir, "done")
-        makedirs(raw_dir, exist_ok=True)
-        makedirs(medium_dir, exist_ok=True)
-        makedirs(done_dir, exist_ok=True)
-        # arr = SpectrumArray(arr)
-        arr.write(join(medium_dir, "spectra.flex"))
-        datasets[int(snr)] = dataset
-
-    return datasets
-
-
-def run_cross_correlation(runner, load=True):
-    # runner.run_module("planet_reference_spectrum", load=load)
-    # runner.run_module("cross_correlation_reference", load=load)
-    data = runner.run_module("cross_correlation", load=load)
-    return data
-
-
-def calculate_cohen_d_for_dataset(runner, sysrem="7", plot=True, title=""):
-    planet = runner.planet
-    star = runner.star
-
-    spectra = runner.data["spectra"]
-    data = runner.data["cross_correlation"]
-
-    datetime = spectra.datetime
     phi = (datetime - planet.time_of_transit) / planet.period
     phi = phi.to_value(1)
     # We only care about the fraction
@@ -156,22 +246,21 @@ def calculate_cohen_d_for_dataset(runner, sysrem="7", plot=True, title=""):
     in_transit = (phi >= ingress) | (phi <= egress)
 
     data = data[str(sysrem)]
-    config = runner.configuration["cross_correlation"]
-    rv_range = config["rv_range"]
-    rv_points = config["rv_points"]
-    rv_step = (2 * rv_range + 1) / rv_points
+    rv_points = int(2 * rv_range / rv_step + 1)
     rv = np.linspace(-rv_range, rv_range, rv_points)
     vp_idx = np.interp(vp, rv, np.arange(rv.size))
 
     if plot:
-        plt.imshow(data, aspect="auto", origin="lower")
+        vmin, vmax = np.nanpercentile(data.ravel(), [5, 95])
+        plt.imshow(data, aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
         plt.xlabel("rv [km/s]")
         plt.ylabel("#Obs")
         xticks = plt.xticks()[0][1:-1]
-        xticks_labels = np.interp(xticks, np.arange(len(rv)), rv)
+        rv_ticks = np.linspace(xticks[0], xticks[-1], len(rv))
+        xticks_labels = np.interp(xticks, rv_ticks, rv)
         xticks_labels = [f"{x:.3g}" for x in xticks_labels]
         plt.xticks(xticks, labels=xticks_labels)
-        plt.plot(vp_idx, np.arange(data.shape[0]), "r-.", alpha=0.5)
+        # plt.plot(vp_idx, np.arange(data.shape[0]), "r-.", alpha=0.5)
         plt.hlines(
             np.arange(data.shape[0])[in_transit][0],
             -0.5,
@@ -290,7 +379,8 @@ def calculate_cohen_d_for_dataset(runner, sysrem="7", plot=True, title=""):
         plt.imshow(data, aspect="auto", origin="lower")
         plt.xlabel("rv [km/s]")
         xticks = plt.xticks()[0][1:-1]
-        xticks_labels = np.interp(xticks, np.arange(len(rv)), rv)
+        rv_ticks = np.linspace(xticks[0], xticks[-1], len(rv))
+        xticks_labels = np.interp(xticks, rv_ticks, rv)
         xticks_labels = [f"{x:.3g}" for x in xticks_labels]
         plt.xticks(xticks, labels=xticks_labels)
         plt.plot(vp_idx, np.arange(data.shape[0]), "r-.")
@@ -335,7 +425,8 @@ def calculate_cohen_d_for_dataset(runner, sysrem="7", plot=True, title=""):
 
         plt.xlabel("vsys [km/s]")
         xticks = plt.xticks()[0][1:-1]
-        xticks_labels = np.interp(xticks, np.arange(len(vsys)), vsys)
+        rv_ticks = np.linspace(xticks[0], xticks[-1], len(vsys))
+        xticks_labels = np.interp(xticks, rv_ticks, vsys)
         xticks_labels = [f"{x:.3g}" for x in xticks_labels]
         plt.xticks(xticks, labels=xticks_labels)
 
@@ -403,3 +494,86 @@ def calculate_cohen_d_for_dataset(runner, sysrem="7", plot=True, title=""):
         plt.show()
 
     return d
+
+
+def load_data(data_dir, load=False):
+    savefilename = join(data_dir, "../medium/spectra.npz")
+    if load and exists(savefilename):
+        data = np.load(savefilename, allow_pickle=True)
+        fluxlist = data["flux"]
+        wavelist = data["wave"]
+        uncslist = data["uncs"]
+        times = Time(data["time"])
+        segments = data["segments"]
+        return wavelist, fluxlist, uncslist, times, segments
+
+    files_fname = join(data_dir, "*.fits")
+    files = glob(files_fname)
+    additional_data_fname = join(data_dir, "*.csv")
+    try:
+        additional_data = glob(additional_data_fname)[0]
+        additional_data = pd.read_csv(additional_data)
+    except IndexError:
+        additional_data = None
+
+    fluxlist, wavelist, uncslist, times = [], [], [], []
+    for f in tqdm(files):
+        i = int(basename(f)[-8:-5])
+        hdu = fits.open(f)
+        wave = hdu[1].data << u.AA
+        flux = hdu[2].data << u.one
+
+        if additional_data is not None:
+            add = additional_data.iloc[i]
+            time = Time(add["time"], format="jd")
+
+        fluxes, waves, uncses = [], [], []
+        orders = list(range(wave.shape[1]))
+        for order in orders:
+            for det in [1, 2, 3]:
+                w = wave[det - 1, order]
+                f = flux[det - 1, order]
+                if np.all(np.isnan(w)) or np.all(np.isnan(f)):
+                    continue
+
+                # We just assume shot noise, no read out noise etc
+                unc = np.sqrt(np.abs(f))
+                fluxes += [f]
+                waves += [w]
+                uncses += [unc]
+
+        nseg = len(fluxes)
+        npoints = len(fluxes[0])
+        segments = np.arange(0, (nseg + 1) * npoints, npoints)
+
+        flux = np.concatenate(fluxes)
+        wave = np.concatenate(waves)
+        uncs = np.concatenate(uncses)
+        fluxlist += [flux]
+        wavelist += [wave]
+        uncslist += [uncs]
+        times += [time]
+        hdu.close()
+
+    fluxlist = np.stack(fluxlist)
+    wavelist = np.stack(wavelist)
+    uncslist = np.stack(uncslist)
+
+    times = Time(times)
+    sort = np.argsort(times)
+
+    fluxlist = fluxlist[sort]
+    wavelist = wavelist[sort]
+    uncslist = uncslist[sort]
+    times = times[sort]
+
+    savefilename = join(data_dir, "../medium/spectra.npz")
+    np.savez(
+        savefilename,
+        flux=fluxlist,
+        wave=wavelist,
+        uncs=uncslist,
+        time=times,
+        segments=segments,
+    )
+    return wavelist, fluxlist, uncslist, times, segments

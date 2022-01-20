@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from os.path import exists
+from os.path import dirname, exists, join
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,18 +7,37 @@ import numpy as np
 from exoplanet_transit_snr.snr_estimate import (
     calculate_cohen_d_for_dataset,
     init_cats,
+    load_data,
     run_cross_correlation,
 )
+from exoplanet_transit_snr.stellardb import StellarDb
 
 star, planet = "WASP-107", "b"
 datasets = {50: "WASP-107b_SNR50", 100: "WASP-107b_SNR100", 200: "WASP-107b_SNR200"}
 
-for snr in [50, 100, 200]:
-    runner = init_cats(star, planet, datasets[snr])
-    runner.configuration["planet_reference_spectrum"]["method"] = "petitRADTRANS"
-    data = run_cross_correlation(runner, load=False)
+sdb = StellarDb()
+star = sdb.get(star)
+planet = star.planets[planet]
+
+rv_range = 200
+rv_step = 0.25
+
+for snr in [200]:
+    data_dir = join(dirname(__file__), "../datasets", datasets[snr], "Spectrum_00")
+    data = load_data(data_dir, load=True)
+    cc_data = run_cross_correlation(
+        data, rv_range=rv_range, rv_step=rv_step, load=False, data_dir=data_dir
+    )
     d = calculate_cohen_d_for_dataset(
-        runner, sysrem="5", plot=False, title=f"{star} {planet} SNR{snr}"
+        data,
+        cc_data,
+        star,
+        planet,
+        rv_range=rv_range,
+        rv_step=rv_step,
+        sysrem="7",
+        plot=False,
+        title=f"WASP-107 b SNR{snr}",
     )
 
 # filename = "cohends.npz"
