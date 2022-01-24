@@ -4,7 +4,6 @@ from copy import copy
 import numpy as np
 from astropy import units as u
 from astropy.units import Quantity
-from matplotlib.pyplot import imshow
 
 try:
     # Importing petitRADTRANS takes forever...
