@@ -160,9 +160,14 @@ def run_cross_correlation(
             skip_mask[segments[seg] : segments[seg + 1]] = False
 
     # reference = cross_correlation_reference
-    flux = flux
+    if isinstance(wave, u.Quantity):
+        wave = wave.to_value(u.AA)
+    if isinstance(flux, u.Quantity):
+        flux = flux.to_value(1)
     if uncs is None:
         uncs = np.ones_like(flux)
+    elif isinstance(uncs, u.Quantity):
+        uncs = uncs.to_value(1)
 
     correlation = {}
     for n in tqdm(range(max_nsysrem), desc="Sysrem N"):
@@ -521,7 +526,7 @@ def load_data(data_dir, load=False):
         i = int(basename(f)[-8:-5])
         hdu = fits.open(f)
         wave = hdu[1].data << u.AA
-        flux = hdu[2].data << u.one
+        flux = hdu[2].data
 
         if additional_data is not None:
             add = additional_data.iloc[i]
