@@ -1,2 +1,7 @@
 /local
 /datasets
+*.h5
+*.npy
+*.cprof
+exoplanet_transit_snr/_mcmc.html
+exoplanet_transit_snr/_mcmc.c

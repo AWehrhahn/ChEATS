@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-from copy import copy
+from typing import Tuple
+from unittest import runner
 
 import numpy as np
 from astropy import units as u
@@ -21,8 +22,8 @@ except (ImportError, IOError):
 class petitRADTRANS:
     def __init__(
         self,
-        star,
-        planet,
+        wmin,
+        wmax,
         line_species=("H2O", "CO", "CH4", "CO2"),
         rayleigh_species=("H2", "He"),
         continuum_species=("H2-H2", "H2-He"),
@@ -35,79 +36,94 @@ class petitRADTRANS:
             "CH4": 1e-6,
         },
     ):
-        self.star = star
-        self.planet = planet
-        self.line_species = line_species
-        self.rayleigh_species = rayleigh_species
-        self.continuum_species = continuum_species
-        # copy the dictionary, so we don't accidentally do stupid mistakes
-        self.mass_fractions = copy(mass_fractions)
-
-    def run(self, wmin: Quantity, wmax: Quantity):
         if prt is None:
             raise RuntimeError("petitRadtrans could not be imported")
 
-        # Prepare the input
-        wmin = wmin.to_value("um")
-        wmax = wmax.to_value("um")
         # Initialize atmosphere
         # including the elements in the atmosphere
-        atmosphere = prt.Radtrans(
-            line_species=self.line_species,
-            rayleigh_species=self.rayleigh_species,
-            continuum_opacities=self.continuum_species,
+        wmin = wmin.to_value("um")
+        wmax = wmax.to_value("um")
+        self.atmosphere = prt.Radtrans(
+            line_species=line_species,
+            rayleigh_species=rayleigh_species,
+            continuum_opacities=continuum_species,
             wlen_bords_micron=[wmin, wmax],
             mode="lbl",
         )
 
-        # Define planet parameters
-        # Planet radius
-        r_pl = self.planet.radius.to_value("cm")
-        # surface gravity
-        gravity = self.planet.surface_gravity.to_value("cm/s**2")
-        # reference pressure (for the surface gravity and radius)
-        # TODO: ????
-        p0 = self.planet.atm_surface_pressure.to_value("bar")
-
         # Pressure in bar
         # has to be equispaced in log
-        print("Setup atmosphere pressures")
-        pressures = np.logspace(-6, 0, 100)
-        atmosphere.setup_opa_structure(pressures)
-
-        # Define temperature pressure profile
-        kappa_IR = 0.01  # opacity in the IR
-        gamma = 0.4  # ratio between the opacity in the optical and the IR
-        T_int = 200.0  # Internal temperature
-        # T_equ = 1500.0
-        T_equ = self.planet.equilibrium_temperature(
-            self.star.teff, self.star.radius
-        ).to_value("K")
-        temperature = nc.guillot_global(
-            pressures, kappa_IR, gamma, gravity, T_int, T_equ
-        )
+        self.pressures = np.logspace(-6, 0, 100)
+        self.atmosphere.setup_opa_structure(self.pressures)
 
         # Define mass fractions
-        mass_fractions = {}
-        for elem, frac in self.mass_fractions.items():
-            mass_fractions[elem] = frac * np.ones_like(temperature)
+        self.mass_fractions = {}
+        for elem, frac in mass_fractions.items():
+            self.mass_fractions[elem] = frac * np.ones_like(self.pressures)
 
         # TODO: should this be changed depending on the molecules?
-        mmw = 2.33 * np.ones_like(temperature)
+        self.mmw = 2.33 * np.ones_like(self.pressures)
+
+        # Parameters for the TP profile
+        self.kappa_IR = 0.01  # opacity in the IR
+        self.gamma = 0.4  # ratio between the opacity in the optical and the IR
+
+        self.r_pl = None
+        self.gravity = None
+        self.p0 = None
+        self.T_int = None
+        self.T_equ = None
+        self.temperature = None
+
+    def init_temp_press_profile(self, star, planet):
+        # Define planet parameters
+        # Planet radius
+        self.r_pl = planet.radius.to_value("cm")
+        self.r_star = star.radius.to_value("cm")
+        # surface gravity
+        self.gravity = planet.surface_gravity.to_value("cm/s**2")
+        # reference pressure (for the surface gravity and radius)
+        # TODO: ????
+        self.p0 = planet.atm_surface_pressure.to_value("bar")
+
+        # Define temperature pressure profile
+        self.T_int = 200.0  # Internal temperature
+        self.T_equ = planet.equilibrium_temperature(star.teff, star.radius).to_value(
+            "K"
+        )
+        self.temperature = nc.guillot_global(
+            self.pressures,
+            self.kappa_IR,
+            self.gamma,
+            self.gravity,
+            self.T_int,
+            self.T_equ,
+        )
+
+    def run(self) -> Tuple[Quantity, np.ndarray]:
+        if self.temperature is None:
+            raise RuntimeError("Initialize the Temperature-Pressure Profile first")
 
         # Calculate transmission spectrum
-        print("Calculate transmission Spectrum")
-        atmosphere.calc_transm(
-            temperature, mass_fractions, gravity, mmw, R_pl=r_pl, P0_bar=p0
+        self.atmosphere.calc_transm(
+            self.temperature,
+            self.mass_fractions,
+            self.gravity,
+            self.mmw,
+            R_pl=self.r_pl,
+            P0_bar=self.p0,
         )
+
         # Wavelength in um
-        wave = nc.c / atmosphere.freq / 1e-4
+        wave = nc.c / self.atmosphere.freq / 1e-4
         wave = wave << u.um
 
-        # Normalized flux spectrum
-        flux = atmosphere.transm_rad / self.nc.r_sun
-        flux -= flux.min()
-        flux /= flux.max()
+        # Normalized transmission spectrum
+        # Step 1: transmission radius in units of the stellar radius
+        flux = self.atmosphere.transm_rad / self.r_star
+        # flux -= flux.min()
+        # flux /= flux.max()
+        # Step 2: Get the "area" that is covered by the planet
         flux = 1 - flux ** 2
 
         return wave, flux
