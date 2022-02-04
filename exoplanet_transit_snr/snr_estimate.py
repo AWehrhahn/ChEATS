@@ -227,7 +227,7 @@ def run_cross_correlation(
                     total[i, : rv_points - m * k] += corr[i, i + m, k * m :]
                 total[i] = np.roll(total[i], -m * k)
             total_total[k] = np.sum(total, axis=0)
-        correlation[n] = total_total
+        correlation[str(n)] = total_total
 
     if data_dir is not None:
         np.savez(savefilename, **correlation)
