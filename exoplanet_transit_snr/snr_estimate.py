@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from glob import glob
+from itertools import combinations
 from os import makedirs
 from os.path import basename, dirname, join, realpath
+from tkinter import N
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,6 +19,7 @@ from astropy.time import Time
 from exoorbit.orbit import Orbit
 from genericpath import exists
 from scipy.interpolate import interp1d
+from scipy.special import binom
 from tqdm import tqdm
 
 from .stats import cohen_d, gauss, gaussfit
@@ -185,39 +188,46 @@ def run_cross_correlation(
         c_light = c.to_value("km/s")
 
         # Run the cross correlation for all times and radial velocity offsets
-        corr = np.zeros((flux.shape[0], int(rv_points)))
-        for i in tqdm(range(flux.shape[0] - 1), leave=False, desc="Observation"):
-            for j in tqdm(
+        corr = np.zeros((flux.shape[0], flux.shape[0], int(rv_points)))
+        total = binom(flux.shape[0], 2)
+        for i, j in tqdm(
+            combinations(range(flux.shape[0]), 2), total=total, desc="Combinations"
+        ):
+            # for i in tqdm(range(flux.shape[0] - 1), leave=False, desc="Observation"):
+            for k in tqdm(
                 range(rv_points),
                 leave=False,
                 desc="radial velocity",
             ):
                 # Doppler Shift the next spectrum
-                rv = -rv_range + j * rv_step
+                rv = -rv_range + k * rv_step
                 wave_shift = wave_noshift * (1 + rv / c_light)
-                newspectra = np.interp(wave_shift, wave_noshift, corrected_flux[i + 1])
+                newspectra = np.interp(wave_shift, wave_noshift, corrected_flux[j])
 
                 # Mask bad pixels
                 m = np.isfinite(corrected_flux[i])
-                m &= np.isfinite(newspectra[i + 1])
+                m &= np.isfinite(newspectra)
                 m &= skip_mask
 
                 # Cross correlate!
-                corr[i, j] += np.correlate(
+                corr[i, j, k] += np.correlate(
                     corrected_flux[i][m],
                     newspectra[m],
                     "valid",
                 )
                 # Normalize to the number of data points used
-                corr[i, j] *= m.size / np.count_nonzero(m)
+                corr[i, j, k] *= m.size / np.count_nonzero(m)
 
-        correlation[f"{n}"] = np.copy(corr)
-        for i in tqdm(
-            range(max_nsysrem_after),
-            leave=False,
-            desc="Sysrem on Cross Correlation",
-        ):
-            correlation[f"{n}.{i}"] = sysrem(np.copy(corr), i)
+        n_kp = 10
+        total_total = np.zeros((n_kp, rv_points))
+        for k in range(n_kp):
+            total = np.zeros((flux.shape[0], rv_points))
+            for i in range(flux.shape[0]):
+                for m in range(flux.shape[0] - i):
+                    total[i, : rv_points - m * k] += corr[i, i + m, k * m :]
+                total[i] = np.roll(total[i], -m * k)
+            total_total[k] = np.sum(total, axis=0)
+        correlation[n] = total_total
 
     if data_dir is not None:
         np.savez(savefilename, **correlation)
