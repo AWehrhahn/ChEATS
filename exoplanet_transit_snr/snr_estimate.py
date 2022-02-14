@@ -88,7 +88,7 @@ def run_cross_correlation(
 
         # Run the cross correlation for all times and radial velocity offsets
         corr = np.zeros((flux.shape[0], flux.shape[0], int(rv_points)))
-        total = binom(flux.shape[0], 2)
+        total = int(binom(flux.shape[0], 2))
         for i, j in tqdm(
             combinations(range(flux.shape[0]), 2), total=total, desc="Combinations"
         ):
@@ -128,7 +128,7 @@ def run_cross_correlation(
 
         # Add up cross correlation between different sides
         for i in range(flux.shape[0]):
-            corr[i] += corr[:, i]
+            corr[i] += corr[:, i, ::-1]
 
         mid = flux.shape[0] // 2
         ccf = np.copy(corr[mid])
@@ -140,7 +140,7 @@ def run_cross_correlation(
         plt.imshow(ccf, aspect="auto", origin="lower")
         plt.show()
 
-        correlation[str(n)] = corr[:, 5, :]
+        correlation[str(n)] = corr
 
     if data_dir is not None:
         np.savez(savefilename, **correlation)
