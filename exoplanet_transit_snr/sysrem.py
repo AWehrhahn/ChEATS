@@ -8,7 +8,11 @@ from __future__ import division, print_function
 import warnings
 
 import numpy as np
+import pyximport
 from tqdm import tqdm
+
+pyximport.install(language_level=3)
+from . import _sysrem
 
 
 def generate_matrix(spectra, errors=None):
@@ -95,73 +99,88 @@ class Sysrem:
         input_data: np.ndarray,
         errors: np.ndarray = None,
         iterations: int = 100,
-        tolerance: float = 1e-6,
+        tolerance: float = 1e-10,
     ):
-        self.stars_dim, self.epoch_dim = input_data.shape
+
+        self.epoch_dim, self.stars_dim = input_data.shape
         self.input_data = input_data
         if errors is None:
             errors = np.sqrt(np.abs(input_data))
         self.errors = errors
-        self.errors_squared = errors ** 2
 
         self.iterations = iterations
         self.tolerance = tolerance
 
     def run(self, num: int):
-        # Create all the memory we need for SYSREM
-        c = np.zeros(self.stars_dim)
-        a = np.ones(self.epoch_dim)
-        c_loc = np.zeros(self.stars_dim)
-        a_loc = np.zeros(self.epoch_dim)
-        c_numerator = np.zeros(self.stars_dim)
-        c_denominator = np.zeros(self.stars_dim)
-        a_numerator = np.zeros(self.epoch_dim)
-        a_denominator = np.zeros(self.epoch_dim)
 
-        # remove the median as the first component
-        median = np.nanmedian(self.input_data, axis=0)
-        residuals = self.input_data - median
+        errors_squared = np.require(self.errors.T ** 2, requirements="C")
+        data = np.require(self.input_data.T, requirements="C")
+        residuals, syserrors = _sysrem._sysrem_run(
+            data, num, errors_squared, self.iterations, self.tolerance
+        )
 
-        syserrors = [None] * (num + 1)
-        syserrors[0] = median
-
-        for n in tqdm(range(num), desc="Removing Systematic #", leave=False):
-            with warnings.catch_warnings():
-                warnings.simplefilter(action="ignore", category=RuntimeWarning)
-                # minimize a and c values for a number of iterations, iter
-                for i in tqdm(range(self.iterations), desc="Converging", leave=False):
-                    # Using the initial guesses for each a value of each epoch, minimize c for each star
-                    np.nansum(
-                        a * residuals / self.errors_squared, axis=1, out=c_numerator
-                    )
-                    np.nansum(a ** 2 / self.errors_squared, axis=1, out=c_denominator)
-                    np.divide(c_numerator, c_denominator, out=c_loc)
-
-                    # Using the c values found above, minimize a for each epoch
-                    np.nansum(
-                        c_loc[:, None] * residuals / self.errors_squared,
-                        axis=0,
-                        out=a_numerator,
-                    )
-                    np.nansum(
-                        c_loc[:, None] ** 2 / self.errors_squared,
-                        axis=0,
-                        out=a_denominator,
-                    )
-                    np.divide(a_numerator, a_denominator, out=a_loc)
-
-                    diff = np.nanmean((c_loc - c) ** 2) + np.nanmean((a_loc - a) ** 2)
-                    # Swap the pointers to the memory
-                    c, c_loc = c_loc, c
-                    a, a_loc = a_loc, a
-                    if self.tolerance is not None and diff < self.tolerance:
-                        break
-
-            # Create a matrix for the systematic errors:
-            # syserr = np.zeros((stars_dim, epoch_dim))
-            syserr = c[:, None] * a[None, :]
-            syserrors[n + 1] = syserr
-            # Remove the systematic error
-            residuals = residuals - syserr
-
+        residuals = np.asarray(residuals).T
+        syserrors[0] = np.asarray(syserrors[0])
+        for i in range(1, len(syserrors)):
+            syserrors[i] = np.asarray(syserrors[i]).T
         return residuals, syserrors
+
+        # # Create all the memory we need for SYSREM
+        # c = np.zeros(self.stars_dim)
+        # a = np.ones(self.epoch_dim)
+        # c_loc = np.zeros(self.stars_dim)
+        # a_loc = np.zeros(self.epoch_dim)
+        # c_numerator = np.zeros(self.stars_dim)
+        # c_denominator = np.zeros(self.stars_dim)
+        # a_numerator = np.zeros(self.epoch_dim)
+        # a_denominator = np.zeros(self.epoch_dim)
+
+        # # remove the median as the first component
+        # median = np.nanmedian(self.input_data, axis=0)
+        # residuals = self.input_data - median
+
+        # syserrors = [None] * (num + 1)
+        # syserrors[0] = median
+        # previous_diff = np.inf
+
+        # for n in tqdm(range(num), desc="Removing Systematic #", leave=False):
+        #     with warnings.catch_warnings():
+        #         warnings.simplefilter(action="ignore", category=RuntimeWarning)
+        #         # minimize a and c values for a number of iterations, iter
+        #         for i in tqdm(range(self.iterations), desc="Converging", leave=False):
+        #             # Using the initial guesses for each a value of each epoch, minimize c for each star
+        #             np.nansum(
+        #                 a * residuals / errors_squared, axis=1, out=c_numerator
+        #             )
+        #             np.nansum(a ** 2 / errors_squared, axis=1, out=c_denominator)
+        #             np.divide(c_numerator, c_denominator, out=c_loc)
+
+        #             # Using the c values found above, minimize a for each epoch
+        #             np.nansum(
+        #                 c_loc[:, None] * residuals / errors_squared,
+        #                 axis=0,
+        #                 out=a_numerator,
+        #             )
+        #             np.nansum(
+        #                 c_loc[:, None] ** 2 / errors_squared,
+        #                 axis=0,
+        #                 out=a_denominator,
+        #             )
+        #             np.divide(a_numerator, a_denominator, out=a_loc)
+
+        #             diff = np.nanmean((c_loc - c) ** 2) + np.nanmean((a_loc - a) ** 2)
+        #             # Swap the pointers to the memory
+        #             c, c_loc = c_loc, c
+        #             a, a_loc = a_loc, a
+        #             if self.tolerance is not None and diff < self.tolerance or diff > previous_diff:
+        #                 break
+        #             previous_diff = diff
+
+        #     # Create a matrix for the systematic errors:
+        #     # syserr = np.zeros((stars_dim, epoch_dim))
+        #     syserr = c[:, None] * a[None, :]
+        #     syserrors[n + 1] = syserr
+        #     # Remove the systematic error
+        #     residuals = residuals - syserr
+
+        # return residuals, syserrors

@@ -3,7 +3,7 @@ from glob import glob
 from itertools import combinations
 from os import makedirs
 from os.path import basename, dirname, join, realpath
-from tkinter import N
+from typing import Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,7 +23,7 @@ from scipy.special import binom
 from tqdm import tqdm
 
 from .stats import cohen_d, gauss, gaussfit
-from .sysrem import sysrem
+from .sysrem import Sysrem
 
 # TODO List:
 # - automatically mask points before fitting with SME
@@ -34,122 +34,20 @@ from .sysrem import sysrem
 # - Determine Uncertainties for each point
 
 
-# def get_detector(setting="K/2/4", detectors=(1, 2, 3), orders=(7, 6, 5, 4, 3, 2)):
-#     detector = Crires(setting, detectors, orders=orders)
-#     return detector
-
-
-# def init_cats(
-#     star,
-#     planet,
-#     dataset,
-#     rv_step=0.25,
-#     rv_range=200,
-#     base_dir=None,
-#     raw_dir="Spectrum_00",
-#     detector=None,
-# ):
-#     # Detector
-#     if detector is None:
-#         detector = get_detector()
-
-#     # Initialize the CATS runner
-#     if base_dir is None:
-#         dataset_dir = join(dirname(__file__), "../datasets")
-#         base_dir = join(dataset_dir, dataset)
-#     raw_dir = join(base_dir, raw_dir)
-#     medium_dir = join(base_dir, "medium")
-#     done_dir = join(base_dir, "done")
-#     runner = CatsRunner(
-#         detector,
-#         star,
-#         planet,
-#         None,
-#         base_dir=base_dir,
-#         raw_dir=raw_dir,
-#         medium_dir=medium_dir,
-#         done_dir=done_dir,
-#     )
-#     # Set the radial velocity step size
-#     rv_points = int((2 * rv_range + 1) / rv_step)
-#     runner.configuration["cross_correlation"]["rv_range"] = rv_range
-#     runner.configuration["cross_correlation"]["rv_points"] = rv_points
-#     runner.configuration["cross_correlation_reference"]["rv_range"] = rv_range
-#     runner.configuration["cross_correlation_reference"]["rv_points"] = rv_points
-
-#     # # Override data with known information
-#     # star = runner.star
-#     # planet = runner.planet
-#     return runner
-
-
-# def create_dataset(star, planet, datasets, plot=True):
-
-#     data = []
-#     snrs = []
-#     for snr_local, dataset in datasets.items():
-#         runner = init_cats(star, planet, dataset)
-#         spectra = runner.run_module("spectra", load=True)
-#         data += [spectra]
-#         snrs += [snr_local]
-
-#     result = []
-#     new_snrs = []
-#     for i in range(len(data)):
-#         # TODO: combine observations from different datasets
-#         j = i
-#         # snr_i, snr_j = snrs[i], snrs[j]
-#         data_i, data_j = data[i], data[j]
-
-#         new_snr = np.sqrt(snrs[i] ** 2 + snrs[j] ** 2)
-#         if len(data_i) == len(data_j):
-#             n = (len(data_i) // 2) * 2
-#             new_data = data_i.flux[:n:2] + data_j.flux[1:n:2]
-#             new_wave = data_i.wavelength[:n:2]
-#             new_time = (data_i.datetime[:n:2].mjd + data_j.datetime[1:n:2].mjd) / 2
-#             new_time = Time(new_time, format="mjd")
-#             new_segments = data_i.segments
-#         else:
-#             # This should not happen (yet)
-#             pass
-
-#         arr = SpectrumArray(
-#             flux=new_data, spectral_axis=new_wave, segments=new_segments
-#         )
-#         arr.datetime = new_time
-
-#         new_snrs += [new_snr]
-#         result += [arr]
-
-#     datasets = {}
-#     for snr, arr in zip(new_snrs, result):
-#         dataset = f"WASP-107b_SNR{int(snr)}"
-#         base_dir = realpath(join(dirname(__file__), f"../datasets/{dataset}"))
-#         raw_dir = join(base_dir, "Spectrum_00")
-#         medium_dir = join(base_dir, "medium")
-#         done_dir = join(base_dir, "done")
-#         makedirs(raw_dir, exist_ok=True)
-#         makedirs(medium_dir, exist_ok=True)
-#         makedirs(done_dir, exist_ok=True)
-#         # arr = SpectrumArray(arr)
-#         arr.write(join(medium_dir, "spectra.flex"))
-#         datasets[int(snr)] = dataset
-
-#     return datasets
-
-
 def run_cross_correlation(
-    data,
-    max_nsysrem=10,
-    max_nsysrem_after=3,
-    rv_range=100,
-    rv_step=1,
-    skip=None,
-    load=False,
-    data_dir=None,
+    data: Tuple,
+    nsysrem: int,
+    rv_range: float = 100,
+    rv_step: float = 1,
+    skip: Tuple = None,
+    load: bool = False,
+    data_dir: str = None,
 ):
     wave, flux, uncs, times, segments = data
     rv_points = int(2 * rv_range / rv_step + 1)
+
+    if np.isscalar(nsysrem):
+        nsysrem = (nsysrem,)
 
     if data_dir is not None:
         savefilename = join(data_dir, "../medium/cross_correlation.npz")
@@ -173,8 +71,9 @@ def run_cross_correlation(
         uncs = uncs.to_value(1)
 
     correlation = {}
-    for n in tqdm(range(max_nsysrem), desc="Sysrem N"):
-        corrected_flux = sysrem(flux, num_errors=n, errors=uncs)
+    sysrem = Sysrem(flux, uncs)
+    for n in tqdm(nsysrem, desc="Sysrem N"):
+        corrected_flux, _ = sysrem.run(n)
 
         # Normalize by the standard deviation in this wavelength column
         std = np.nanstd(corrected_flux, axis=0)
@@ -193,16 +92,25 @@ def run_cross_correlation(
         for i, j in tqdm(
             combinations(range(flux.shape[0]), 2), total=total, desc="Combinations"
         ):
-            # for i in tqdm(range(flux.shape[0] - 1), leave=False, desc="Observation"):
             for k in tqdm(
                 range(rv_points),
                 leave=False,
                 desc="radial velocity",
             ):
                 # Doppler Shift the next spectrum
+                # keep the inter order gaps as NaN
+                # so we don't get cross correlations there
                 rv = -rv_range + k * rv_step
                 wave_shift = wave_noshift * (1 + rv / c_light)
-                newspectra = np.interp(wave_shift, wave_noshift, corrected_flux[j])
+                newspectra = np.copy(corrected_flux[j])
+                for low, upp in zip(segments[:-1], segments[1:]):
+                    newspectra[low:upp] = np.interp(
+                        wave_shift[low:upp],
+                        wave_noshift[low:upp],
+                        corrected_flux[j, low:upp],
+                        left=np.nan,
+                        right=np.nan,
+                    )
 
                 # Mask bad pixels
                 m = np.isfinite(corrected_flux[i])
@@ -218,16 +126,21 @@ def run_cross_correlation(
                 # Normalize to the number of data points used
                 corr[i, j, k] *= m.size / np.count_nonzero(m)
 
-        n_kp = 10
-        total_total = np.zeros((n_kp, rv_points))
-        for k in range(n_kp):
-            total = np.zeros((flux.shape[0], rv_points))
-            for i in range(flux.shape[0]):
-                for m in range(flux.shape[0] - i):
-                    total[i, : rv_points - m * k] += corr[i, i + m, k * m :]
-                total[i] = np.roll(total[i], -m * k)
-            total_total[k] = np.sum(total, axis=0)
-        correlation[str(n)] = total_total
+        # Add up cross correlation between different sides
+        for i in range(flux.shape[0]):
+            corr[i] += corr[:, i]
+
+        mid = flux.shape[0] // 2
+        ccf = np.copy(corr[mid])
+        for i in range(1, mid):
+            ccf[:-i] += corr[mid + i, i:]
+        for i in range(1, mid):
+            ccf[i:] += corr[mid - i, :-i]
+
+        plt.imshow(ccf, aspect="auto", origin="lower")
+        plt.show()
+
+        correlation[str(n)] = corr[:, 5, :]
 
     if data_dir is not None:
         np.savez(savefilename, **correlation)

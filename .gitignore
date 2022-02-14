@@ -2,6 +2,10 @@
 /datasets
 *.h5
 *.npy
+*.npz
 *.cprof
-exoplanet_transit_snr/_mcmc.html
-exoplanet_transit_snr/_mcmc.c
+*.lin
+
+exoplanet_transit_snr/_*.html
+exoplanet_transit_snr/_*.c
+syntherr.log
