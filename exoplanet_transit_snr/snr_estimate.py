@@ -127,18 +127,20 @@ def run_cross_correlation(
                 corr[i, j, k] *= m.size / np.count_nonzero(m)
 
         # Add up cross correlation between different sides
-        for i in range(flux.shape[0]):
-            corr[i] += corr[:, i, ::-1]
+        # for i in range(flux.shape[0]):
+        #     corr[i] += corr[:, i, ::-1]
+        #     corr[i] /= np.median(corr[i], axis=1)[:, None]
+        #     corr[i] = np.nan_to_num(corr[i], nan=0)
 
-        mid = flux.shape[0] // 2
-        ccf = np.copy(corr[mid])
-        for i in range(1, mid):
-            ccf[:-i] += corr[mid + i, i:]
-        for i in range(1, mid):
-            ccf[i:] += corr[mid - i, :-i]
+        # mid = flux.shape[0] // 2
+        # ccf = np.copy(corr[mid])
+        # for i in range(1, mid):
+        #     ccf[:-i] += corr[mid + i, i:]
+        # for i in range(1, mid):
+        #     ccf[i:] += corr[mid - i, :-i]
 
-        plt.imshow(ccf, aspect="auto", origin="lower")
-        plt.show()
+        # plt.imshow(ccf, aspect="auto", origin="lower")
+        # plt.show()
 
         correlation[str(n)] = corr
 

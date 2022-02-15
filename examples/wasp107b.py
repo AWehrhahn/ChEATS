@@ -58,7 +58,7 @@ for snr in [200]:
     # Calculate the cohen d value for this cross correlation
     d = calculate_cohen_d_for_dataset(
         data,
-        cc_data,
+        cc_data_coadd,
         star,
         planet,
         rv_range=rv_range,
