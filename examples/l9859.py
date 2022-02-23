@@ -1,14 +1,26 @@
 # -*- coding: utf-8 -*-
-from os.path import exists
+from os.path import dirname, join
 
 import matplotlib.pyplot as plt
 import numpy as np
+from exoorbit.orbit import Orbit
 
 from exoplanet_transit_snr.snr_estimate import (
     calculate_cohen_d_for_dataset,
-    init_cats,
+    load_data,
     run_cross_correlation,
 )
+from exoplanet_transit_snr.stellardb import StellarDb
+
+def coadd_cross_correlation(cc_data, rv, rv_array):
+    cc_data_interp = np.zeros_like(cc_data)
+    for i in range(len(cc_data)):
+        for j in range(len(cc_data[0])):
+            cc_data[i,j,800-3:800+4]=0
+            cc_data_interp[i,j] = np.interp(rv_array-(rv[i]-rv[j]).to_value("km/s"), rv_array, cc_data[i,j])
+    # Co-add to sort of stack them together
+    coadd_sum = np.sum(cc_data_interp, axis=(0, 1))
+    return coadd_sum
 
 star, planet = "L 98-59", "c"
 datasets = {
@@ -17,43 +29,38 @@ datasets = {
     200: "L98-59c_Earth_SNR200",
 }
 
-for snr in [50, 100, 200]:
-    runner = init_cats(star, planet, datasets[snr], raw_dir="Spectrum_00")
-    runner.configuration["planet_reference_spectrum"]["method"] = "petitRADTRANS"
-    data = run_cross_correlation(runner, load=False)
-    d = calculate_cohen_d_for_dataset(
-        runner, sysrem="5", plot=False, title=f"{star} {planet} SNR{snr}"
+# Load the nominal data for this star and planet from simbad/nasa exoplanet archive
+sdb = StellarDb()
+star = sdb.get(star)
+planet = star.planets[planet]
+orbit = Orbit(star, planet)
+
+# Define the +- range of the radial velocity points,
+# and the density of the sampling
+rv_range = 200
+rv_step = 0.25
+
+for snr in [200]:
+    # Where to find the data, might need to be adjusted
+    data_dir = join(dirname(__file__), "../datasets", datasets[snr], "Spectrum_00")
+    # load the data from the fits files, returns several objects
+    data = load_data(data_dir, load=True)
+    wave, flux, uncs, times, segments = data
+
+    # Run the cross correlation to the next neighbour
+    cc_data, rv_array = run_cross_correlation(
+        data,
+        nsysrem=10,
+        rv_range=rv_range,
+        rv_step=rv_step,
+        load=False,
+        data_dir=data_dir,
     )
-pass
-# filename = "cohends.npz"
-# if not exists(filename):
-#     ds = {}
-#     for sysrem in ["4.1"]: #"3 4 5 6 7 8 9".split():
-#         for snr, dataset in datasets.items():
-#             ds[f"{sysrem}_{snr}"] = calculate_cohen_d_for_dataset(
-#                 runner, sysrem=str(sysrem), plot=True
-#             )
-#     np.savez("cohends.npz", **ds)
-# else:
-#     ds = np.load("cohends.npz")
 
-# # Plot the results
-# sysrem_snr = [s.split("_") for s in list(ds.keys())]
-# sysrem = {s[0] for s in sysrem_snr}
-# snr = {int(s[1]) for s in sysrem_snr}
-
-# x = np.array(sorted(list(snr)))[:-1]
-# xd = np.linspace(x.min(), x.max(), 100)
-# for sysrem in ["4", "5", "6", "7", "8", "9"]:
-#     y = [ds[f"{sysrem}_{snr}"] for snr in x]
-#     line = plt.plot(x, y, "+", label=sysrem)
-#     color = line[0].get_color()
-#     yf = np.polyval(np.polyfit(x, y, 2), xd)
-#     plt.plot(xd, yf, color=color)
-#     maxpos = xd[np.argmax(yf)]
-#     plt.vlines(maxpos, yf.min(), yf.max(), color=color)
-# plt.xlabel("SNR")
-# plt.ylabel("Cohen d")
-# plt.legend()
-# plt.show()
-# pass
+    rv = orbit.radial_velocity_planet(times)
+    cc_data = cc_data["10"]
+    cc_data_coadd = coadd_cross_correlation(cc_data, rv, rv_array)
+    
+    plt.plot(rv_array,cc_data_coadd)
+    
+    plt.show()

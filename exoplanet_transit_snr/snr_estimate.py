@@ -33,7 +33,6 @@ from .sysrem import Sysrem
 # - Refactoring of the steps, a lot of the code is strewm all over the place
 # - Determine Uncertainties for each point
 
-
 def run_cross_correlation(
     data: Tuple,
     nsysrem: int,
@@ -92,6 +91,7 @@ def run_cross_correlation(
         for i, j in tqdm(
             combinations(range(flux.shape[0]), 2), total=total, desc="Combinations"
         ):
+            rv_array = np.zeros(rv_points)
             for k in tqdm(
                 range(rv_points),
                 leave=False,
@@ -101,6 +101,7 @@ def run_cross_correlation(
                 # keep the inter order gaps as NaN
                 # so we don't get cross correlations there
                 rv = -rv_range + k * rv_step
+                rv_array[k] = rv
                 wave_shift = wave_noshift * (1 + rv / c_light)
                 newspectra = np.copy(corrected_flux[j])
                 for low, upp in zip(segments[:-1], segments[1:]):
@@ -146,7 +147,7 @@ def run_cross_correlation(
 
     if data_dir is not None:
         np.savez(savefilename, **correlation)
-    return correlation
+    return correlation, rv_array
 
 
 def calculate_cohen_d_for_dataset(
