@@ -135,7 +135,10 @@ def run_cross_correlation(
         savefilename = join(data_dir, "../medium/cross_correlation.npz")
         if load and exists(savefilename):
             data = np.load(savefilename)
-            rv_array = data["rv_array"]
+            if "rv_array" in data:
+                rv_array = data["rv_array"]
+            else:
+                rv_array = np.arange(-rv_range, rv_range + rv_step, rv_step)
             return data, rv_array
 
     skip_mask = np.full(flux.shape[1], True)
