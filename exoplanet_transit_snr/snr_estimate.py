@@ -12,6 +12,7 @@ from astropy import units as u
 from astropy.constants import c
 from astropy.io import fits
 from astropy.time import Time
+from exoorbit.bodies import Planet
 
 # from cats.extractor.runner import CatsRunner
 # from cats.simulator.detector import Crires
@@ -19,6 +20,7 @@ from astropy.time import Time
 from exoorbit.orbit import Orbit
 from genericpath import exists
 from scipy.interpolate import interp1d
+from scipy.optimize import curve_fit
 from scipy.special import binom
 from tqdm import tqdm
 
@@ -32,6 +34,87 @@ from .sysrem import Sysrem
 # - Tests for all the steps
 # - Refactoring of the steps, a lot of the code is strewm all over the place
 # - Determine Uncertainties for each point
+
+
+def coadd_cross_correlation(
+    cc_data: np.ndarray,
+    rv: np.ndarray,
+    rv_array: np.ndarray,
+    times: Time,
+    planet: Planet,
+    data_dir: str = None,
+    load: bool = True,
+):
+    """Sum the cross correlation data along the expected planet trajectory
+
+    Parameters
+    ----------
+    cc_data : np.ndarray
+        cross correlation data, between all combinations of spectra
+    rv : np.ndarray
+        radial velocity of the planet at each time point
+    rv_array : np.ndarray
+        radial velocity points of the cc_data
+    times : Time
+        observation times of the spectra
+    planet : Planet
+        Planet metadata object
+    data_dir : str, optional
+        directory to cache data in, by default None
+    load : bool, optional
+        whether to load data from the cache or not, by default True
+
+    Returns
+    -------
+    coadd_sum
+        sum of all cross correlation data
+    coadd_sum_it
+        sum of cross correlation data, during the transit
+    coadd_sum_oot
+        sum of cross correlation data, out of the transit
+    """
+    if data_dir is not None:
+        savefilename = join(data_dir, "../medium/cross_correlation_coadd.npz")
+        if load and exists(savefilename):
+            data = np.load(savefilename)
+            coadd_sum = data["coadd_sum"]
+            coadd_sum_it = data["coadd_sum_it"]
+            coadd_sum_oot = data["coadd_sum_oot"]
+            return coadd_sum, coadd_sum_it, coadd_sum_oot
+
+    mid = cc_data.shape[-1] // 2
+    offset = 3
+    cc_data_interp = np.zeros_like(cc_data)
+    for i in range(len(cc_data)):
+        for j in range(len(cc_data[0])):
+            # -3 and +4 is the same bc of how python does things
+            cc_data[i, j, mid - offset : mid + offset + 1] = 0
+            cc_data_interp[i, j] = np.interp(
+                rv_array - (rv[i] - rv[j]).to_value("km/s"), rv_array, cc_data[i, j]
+            )
+    # Co-add to sort of stack them together
+    coadd_sum = np.sum(cc_data_interp, axis=(0, 1))
+    phi = (times - planet.time_of_transit) / planet.period
+    phi = phi.to_value(1)
+    # We only care about the fraction
+    phi = phi % 1
+    ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    in_transit = (phi >= ingress) | (phi <= egress)
+    out_transit = ~in_transit
+    coadd_sum_it = np.sum(cc_data_interp[in_transit][:, in_transit], axis=(0, 1))
+    coadd_sum_oot = np.sum(cc_data_interp[out_transit][:, out_transit], axis=(0, 1))
+
+    if data_dir is not None:
+        np.savez(
+            savefilename,
+            coadd_sum=coadd_sum,
+            coadd_sum_it=coadd_sum_it,
+            coadd_sum_oot=coadd_sum_oot,
+        )
+
+    return coadd_sum, coadd_sum_it, coadd_sum_oot
+
 
 def run_cross_correlation(
     data: Tuple,
@@ -52,7 +135,8 @@ def run_cross_correlation(
         savefilename = join(data_dir, "../medium/cross_correlation.npz")
         if load and exists(savefilename):
             data = np.load(savefilename)
-            return data
+            rv_array = data["rv_array"]
+            return data, rv_array
 
     skip_mask = np.full(flux.shape[1], True)
     if skip is not None:
@@ -146,7 +230,7 @@ def run_cross_correlation(
         correlation[str(n)] = corr
 
     if data_dir is not None:
-        np.savez(savefilename, **correlation)
+        np.savez(savefilename, **correlation, rv_array=rv_array)
     return correlation, rv_array
 
 

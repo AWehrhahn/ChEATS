@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from os.path import dirname, join
+from os.path import dirname, exists, join
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,33 +7,12 @@ from exoorbit.orbit import Orbit
 
 from exoplanet_transit_snr.snr_estimate import (
     calculate_cohen_d_for_dataset,
+    coadd_cross_correlation,
     load_data,
     run_cross_correlation,
 )
+from exoplanet_transit_snr.stats import gaussfit
 from exoplanet_transit_snr.stellardb import StellarDb
-
-def coadd_cross_correlation(cc_data, rv, rv_array):
-    cc_data_interp = np.zeros_like(cc_data)
-    for i in range(len(cc_data)):
-        for j in range(len(cc_data[0])):
-            cc_data[i,j,800-3:800+4]=0 #-3 and +4 is the same bc of how python does things
-            cc_data_interp[i,j] = np.interp(rv_array-(rv[i]-rv[j]).to_value("km/s"), rv_array, cc_data[i,j])
-    # Co-add to sort of stack them together
-    coadd_sum = np.sum(cc_data_interp, axis=(0, 1))
-    '''
-    phi = (times - planet.time_of_transit) / planet.period
-    phi = phi.to_value(1)
-    # We only care about the fraction
-    phi = phi % 1
-    ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
-    egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
-    in_transit = (phi >= ingress) | (phi <= egress)
-    out_transit = (phi <= ingress) | (phi >= egress)
-    coadd_sum_it = np.sum(cc_data_interp[in_transit,in_transit], axis=(0, 1))
-    coadd_sum_oot = np.sum(cc_data_interp[out_transit,out_transit], axis=(0, 1))
-    '''
-    return coadd_sum
-    #,coadd_sum_it, coadd_sum_oot
 
 # define the names of the star and planet
 # as well as the datasets within the datasets folder
@@ -51,7 +30,7 @@ orbit = Orbit(star, planet)
 rv_range = 200
 rv_step = 0.25
 
-for snr in [50]:
+for snr in [200]:
     # Where to find the data, might need to be adjusted
     data_dir = join(dirname(__file__), "../datasets", datasets[snr], "Spectrum_00")
     # load the data from the fits files, returns several objects
@@ -64,34 +43,28 @@ for snr in [50]:
         nsysrem=10,
         rv_range=rv_range,
         rv_step=rv_step,
-        load=False,
+        load=True,
         data_dir=data_dir,
     )
 
+    # Coadd all the ccfs together
     rv = orbit.radial_velocity_planet(times)
     cc_data = cc_data["10"]
-    cc_data_coadd = coadd_cross_correlation(cc_data, rv, rv_array)
-    
-    #cc_data_coadd,cc_data_coadd_it,cc_data_coadd_oot = coadd_cross_correlation(cc_data, rv, rv_array)
-    
-    plt.plot(rv_array,cc_data_coadd)
-    
-    #plt.plot(rv_array,cc_data_coadd_it)
-    #plt.plot(rv_array,cc_data_coadd_oot)
-    
-    plt.show()
-
-    '''
-    # Calculate the cohen d value for this cross correlation
-    d = calculate_cohen_d_for_dataset(
-        data,
-        cc_data_coadd,
-        star,
-        planet,
-        rv_range=rv_range,
-        rv_step=rv_step,
-        sysrem="7",
-        plot=True,
-        title=f"WASP-107 b SNR{snr}",
+    cc_data_coadd, cc_it, cc_oot = coadd_cross_correlation(
+        cc_data, rv, rv_array, times, planet, data_dir=data_dir, load=True
     )
-    '''
+
+    # Fit a gaussian
+    p0 = [np.max(cc_data_coadd) - np.min(cc_data_coadd), 0, 10, np.min(cc_data_coadd)]
+    gauss, pval = gaussfit(rv_array, cc_data_coadd, p0=p0)
+
+    # Plot the results
+    plt.plot(rv_array, cc_data_coadd, label="all observations")
+    plt.plot(rv_array, gauss, label="best fit gaussian")
+    plt.plot(rv_array, cc_it, label="in-transit")
+    plt.plot(rv_array, cc_oot, label="out-of-transit")
+    plt.legend()
+    plt.title(f"{star.name} {planet.name} SNR{snr}")
+    plt.xlabel(r"$\Delta$RV [km/s]")
+    plt.ylabel("CCF")
+    plt.show()
