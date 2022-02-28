@@ -54,6 +54,9 @@ for snr in [200]:
         cc_data, rv, rv_array, times, planet, data_dir=data_dir, load=True
     )
 
+    # Normalize by the oot signal
+    cc_it /= cc_oot
+
     # Fit a gaussian
     p0 = [np.max(cc_data_coadd) - np.min(cc_data_coadd), 0, 10, np.min(cc_data_coadd)]
     gauss, pval = gaussfit(rv_array, cc_data_coadd, p0=p0)
