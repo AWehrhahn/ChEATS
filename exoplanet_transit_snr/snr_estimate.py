@@ -82,13 +82,13 @@ def coadd_cross_correlation(
             coadd_sum_oot = data["coadd_sum_oot"]
             return coadd_sum, coadd_sum_it, coadd_sum_oot
 
-    mid = cc_data.shape[-1] // 2
-    offset = 3
+    # mid = cc_data.shape[-1] // 2
+    # offset = 3
     cc_data_interp = np.zeros_like(cc_data)
     for i in range(len(cc_data)):
         for j in range(len(cc_data[0])):
             # -3 and +4 is the same bc of how python does things
-            cc_data[i, j, mid - offset : mid + offset + 1] = 0
+            # cc_data[i, j, mid - offset : mid + offset + 1] = 0
             cc_data_interp[i, j] = np.interp(
                 rv_array - (rv[i] - rv[j]).to_value("km/s"), rv_array, cc_data[i, j]
             )
