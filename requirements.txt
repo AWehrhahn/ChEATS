@@ -5,6 +5,7 @@ numpy
 pandas
 scipy
 tqdm
+cache-decorator
 
 git+https://github.com/AWehrhahn/CATS.git
 git+https://github.com/AWehrhahn/datasources
