@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 class StellarDb:
-    def __init__(self):
-        self.backend = SDB()
+    def __init__(self, regularize=True):
+        self.backend = SDB(regularize=regularize)
+
+    def refresh(self, name):
+        self.backend.auto_fill(name)
 
     def get(self, name):
         """Load the data on the star from the local database, or online
@@ -72,7 +75,7 @@ class StellarDb:
                 inc=p.get("inclination", 90 * u.deg),
                 sma=p.get("semi_major_axis", 0 * u.AU),
                 period=p.get("period"),
-                ecc=p.get("eccentricity"),
+                ecc=p.get("eccentricity", 0 * u.one),
                 omega=p.get("periastron", 90 * u.deg),
                 time_of_transit=p.get("transit_epoch"),
                 transit_duration=p.get("transit_duration", 0 * u.day),

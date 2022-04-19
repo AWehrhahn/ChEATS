@@ -4,8 +4,10 @@ cimport cython
 cimport numpy as np
 
 import numpy as np
+from scipy.sparse import csc_array
+from tqdm import tqdm
 
-from libc.math cimport isnan
+from libc.math cimport INFINITY, NAN, isnan
 
 DTYPE = np.float64
 
@@ -34,6 +36,7 @@ def _sysrem_run(double[:, ::1] input_data, int num, double[:, ::1] errors_square
     # remove the median as the first component
     cdef double[:] median = np.nanmedian(input_data, axis=0)
     cdef double[:, ::1] residuals = np.zeros((stars_dim, epoch_dim), dtype=DTYPE)
+    cdef double prev_diff = INFINITY
 
     for i in range(stars_dim):
         for j in range(epoch_dim):
@@ -42,9 +45,9 @@ def _sysrem_run(double[:, ::1] input_data, int num, double[:, ::1] errors_square
     syserrors = [None] * (num + 1)
     syserrors[0] = median
 
-    for n in range(num):
+    for n in tqdm(range(num), total=num):
         # minimize a and c values for a number of iterations, iter
-        for m in range(iterations):
+        for m in tqdm(range(iterations), total=iterations, leave=False):
             # Using the initial guesses for each a value of each epoch, minimize c for each star
             for i in range(stars_dim):
                 c_numerator[i] = 0
@@ -58,7 +61,7 @@ def _sysrem_run(double[:, ::1] input_data, int num, double[:, ::1] errors_square
                 if k > 0:
                     c_loc[i] = c_numerator[i] / c_denominator[i]
                 else:
-                    c_loc[i] = np.nan
+                    c_loc[i] = NAN
 
             # Using the c values found above, minimize a for each epoch
             for j in range(epoch_dim):
@@ -73,7 +76,7 @@ def _sysrem_run(double[:, ::1] input_data, int num, double[:, ::1] errors_square
                 if k > 0:
                     a_loc[j] = a_numerator[j] / a_denominator[j]
                 else:
-                    a_loc[j] = np.nan
+                    a_loc[j] = NAN
 
             diff1 = 0
             for i in range(stars_dim):
@@ -88,8 +91,9 @@ def _sysrem_run(double[:, ::1] input_data, int num, double[:, ::1] errors_square
             # Swap the pointers to the memory
             c, c_loc = c_loc, c
             a, a_loc = a_loc, a
-            if diff < tolerance:
+            if (diff < tolerance) or (diff > prev_diff):
                 break
+            prev_diff = diff
 
         # Create a matrix for the systematic errors:
         # syserr = np.zeros((stars_dim, epoch_dim))
@@ -102,3 +106,47 @@ def _sysrem_run(double[:, ::1] input_data, int num, double[:, ::1] errors_square
         syserrors[n + 1] = np.copy(syserr)
 
     return residuals, syserrors
+
+
+@cython.boundscheck(False)  # Deactivate bounds checking
+@cython.wraparound(False)   # Deactivate negative indexing.
+@cython.cdivision(True) # Disable division by zero error
+@cython.nonecheck(False)
+def sysrem_with_projection(double[:] a, double[:] c, double[:] t, double[:] residuals, double[:] errors_squared,
+                        double[:, ::1] proj_indices, double[:, ::1] proj_indptr, double[:, ::1] proj_values):
+
+    cdef Py_ssize_t k, i, j, n, m
+    cdef Py_ssize_t stars_dim = t.size
+    cdef Py_ssize_t epoch_dim = a.size
+    cdef int[:] idx
+    cdef double[:] values
+    cdef double tmp, tmp2
+    cdef double[:] c_numerator = np.zeros(stars_dim, dtype=DTYPE)
+    cdef double[:] c_denominator = np.zeros(stars_dim, dtype=DTYPE)
+    cdef double[:] c_loc
+
+    for i in tqdm(range(epoch_dim), leave=False):
+        p_data = proj_values[i]
+        p_indices = proj_indices[i]
+        p_indptr = proj_indptr[i]
+        for k in tqdm(range(stars_dim), leave=False):
+            # TODO: figure the math out
+            idx = p_indices[k]
+            values = p_data[k]
+            values_all = p_data[idx]
+
+            # p[idx] @ c
+            tmp = 0
+            for n in range(len(idx)):
+                j = idx[n]
+                tmp += values_all[n] * c[j]
+
+            # Calculate c
+            for n in range(len(idx)):
+                tmp2 = tmp - values[n] * c[k]
+                c_numerator[k] += a[i] * t[j] / errors_squared[j] * values[n] * (residuals[j] - a[i] * t[j] * tmp2)
+                c_denominator[k] += a[i]**2 * t[j]**2 / errors_squared[j] * values[n]**2
+
+
+
+    return c_numerator, c_denominator

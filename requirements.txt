@@ -9,4 +9,4 @@ tqdm
 git+https://github.com/AWehrhahn/CATS.git
 git+https://github.com/AWehrhahn/datasources
 git+https://github.com/AWehrhahn/ExoOrbits
-git+https://github.com/AWehrhahn/PyPSG.git
+# git+https://github.com/AWehrhahn/PyPSG.git

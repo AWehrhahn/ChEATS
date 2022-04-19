@@ -83,42 +83,36 @@ class SolverBase:
         wt = np.require(wave_to.to_value(u.AA), requirements="C")
         rv = np.require(rv.to_value(u.km / u.s), requirements="C")
 
-        proj = _aaronson._projection_matrix(ws, wt, rv)
-        return proj
-
-        # nrv, nwave = wave_to.shape
-        # assert nrv == rv.size
-        # assert nwave == wave_from.shape[-1]
-
+        # nrv = wave_to.shape[0]
+        # nwave = wave_to.shape[1]
         # proj = [lil_array((nwave, nwave)) for _ in range(nrv)]
-
-        # for j in tqdm(range(len(rv)), total=len(rv), desc="Times", leave=False):
-        #     digits = np.digitize(wave_shifted[j], wave_to[j])
-        #     for i, (d, w) in tqdm(
-        #         enumerate(zip(digits, wave_to[j])), total=digits.size, leave=False, desc="Points"
-        #     ):
-        #         if d >= 0 and d < nwave - 1:
-        #             w0 = wave_shifted[j, d]
-        #             w1 = wave_shifted[j, d+1]
+        # for j in range(nrv):
+        #     digits = np.digitize(wave_to[j], wave_shifted[j])
+        #     for i in range(nwave):
+        #         d = digits[i]
+        #         w = wave_to[j, i]
+        #         if (d > 0) and (d < nwave):
+        #             w0 = wave_shifted[j, d - 1]
+        #             w1 = wave_shifted[j, d]
         #             tmp = (w - w0) / (w1 - w0)
-        #             proj[j][i, d] = 1 - tmp
-        #             proj[j][i, d + 1] = tmp
-        #         elif d >= nwave - 1:
+        #             proj[j][i, d - 1] = 1 - tmp
+        #             proj[j][i, d] = tmp
+        #         elif d >= nwave:
         #             w0 = wave_shifted[j, -2]
         #             w1 = wave_shifted[j, -1]
         #             tmp = (w - w0) / (w1 - w0)
         #             proj[j][i, -2] = 1 - tmp
         #             proj[j][i, -1] = tmp
-        #         else: # d < 0
+        #         else: # d <= 0
         #             w0 = wave_shifted[j, 0]
         #             w1 = wave_shifted[j, 1]
         #             tmp = (w - w0) / (w1 - w0)
         #             proj[j][i, 0] = 1 - tmp
         #             proj[j][i, 1] = tmp
         #     proj[j] = proj[j].tocsc()
-        #     # To test that proj works as exped we can use this:
-        #     # np.all(np.isclose((proj[j] @ wave_from), wave_from.value * rv_factor[j]))
-        # return proj
+
+        proj = _aaronson._projection_matrix(ws, wt, rv)
+        return proj
 
     def prepare_fg(
         self, times, wavelength, spectra, stellar, intensities, telluric, area=None
@@ -130,10 +124,11 @@ class SolverBase:
 
         if area is None:
             area = self.orbit.stellar_surface_covered_by_planet(times)
-            area = area.to_value(1)
+            area = area.to_value(1)[:, None]
 
         model = stellar * telluric
         scale = self.area_atmosphere / self.area_planet
+        b = 1 + area * scale
 
         # Projection matrices
         bary_corr = self.barycentric_correction(times)
@@ -156,10 +151,12 @@ class SolverBase:
         # shift and scale the specific intensities
         for i in range(len(intensities)):
             intensities[i] = J_st[i] @ intensities[i]
-        intensities = intensities * area[:, None]
 
-        f = -model * intensities * scale
-        g = model * (1 - intensities) - spectra
+        f = -area * b * scale * intensities * model
+        # The SYSREM model already includes the grey absorption
+        # from the planet core (I think), so don't include it again
+        # g = model * (1 - intensities) - spectra
+        g = (b * model - spectra) * (1 - area * intensities)
 
         # remove NaN values
         mask = np.isfinite(f) & np.isfinite(g)
@@ -619,7 +616,7 @@ class LinearSolver(SolverBase):
 
         # Normalize x0, each segment individually
         if self.normalize:
-            x0 -= np.nanpercentile(x0, 5)
-            x0 /= np.nanpercentile(x0, 90)
+            x0 -= np.min(x0)
+            x0 /= np.max(x0)
 
         return w0, x0

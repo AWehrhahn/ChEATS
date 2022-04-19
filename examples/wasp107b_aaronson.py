@@ -40,8 +40,8 @@ rv_step = 0.25
 # This chooses the dataset we are actually using
 snr = 100
 nsysrem = 10
-regularization = 100_000
-fname = f"Aaronson_{star.name}_{planet.name}_SNR{snr}_sysrem{nsysrem}_reg{regularization}.npy"
+regularization = 10000
+fname = f"Aaronson_{star.name}_{planet.name}_SNR{snr}_sysrem{nsysrem}_reg{regularization}.npz"
 
 # Where to find the data, might need to be adjusted
 data_dir = join(dirname(__file__), "../datasets", datasets[snr], "Spectrum_00")
@@ -53,11 +53,16 @@ wave, flux, uncs, times, segments = data
 flux[flux < 2] = np.nan
 
 # Run sysrem to get a model of Star * Tellurics * TimeVariation
-sysrem = Sysrem(flux.T, iterations=1000)
-residual, syserr = sysrem.run(nsysrem)
-model = syserr[0] + np.nansum(syserr[1:], axis=0)
-model = model.T
-model[np.isnan(flux)] = np.nan
+fname_sysrem = f"sysrem_snr{snr}.npy"
+try:
+    model = np.load(fname_sysrem)
+except FileNotFoundError:
+    sysrem = Sysrem(flux, iterations=1000)
+    residual, syserr = sysrem.run(nsysrem)
+    model = syserr[0][:, None] + np.nansum(syserr[1:], axis=0)
+    model = model
+    model[np.isnan(flux)] = np.nan
+    np.save(fname_sysrem, model)
 
 # Use PySME to get the specific intensities for this target
 sme_fname = f"sme_intensities_snr{snr}.npz"
@@ -94,7 +99,7 @@ try:
     wave_int, flux_int, cont_int = sme_data["wave"], sme_data["flux"], sme_data["cont"]
     wave_sme, flux_sme = sme_data["wave_sme"], sme_data["flux_sme"]
 except (FileNotFoundError, KeyError):
-    sme = solve(sme, ["teff", "logg", "monh"])
+    sme = synthesize_spectrum(sme)
     flux_sme = sme.synth.ravel()
     wave_sme = sme.wave.ravel()
 
@@ -131,6 +136,7 @@ try:
     solution = [solution[k] for k in solution.keys()]
 except FileNotFoundError:
     solution = []
+    area = orbit.stellar_surface_covered_by_planet(times).to_value(1)
     for low, upp in tqdm(zip(segments[:-1], segments[1:]), total=len(segments) - 1):
         sol = solver.solve(
             times,
@@ -139,6 +145,7 @@ except FileNotFoundError:
             model[:, low:upp],
             intensities[:, low:upp],
             1,
+            area=area,
         )
         solution.append(sol)
     np.savez(fname_solution, *solution)

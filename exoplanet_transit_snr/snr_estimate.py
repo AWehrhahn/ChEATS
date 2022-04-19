@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from ctypes import c_long
 from glob import glob
 from itertools import combinations
 from os import makedirs
@@ -12,20 +13,25 @@ from astropy import units as u
 from astropy.constants import c
 from astropy.io import fits
 from astropy.time import Time
-from exoorbit.bodies import Planet
+from exoorbit.bodies import Planet, Star
 
 # from cats.extractor.runner import CatsRunner
 # from cats.simulator.detector import Crires
 # from cats.spectrum import SpectrumArray
 from exoorbit.orbit import Orbit
 from genericpath import exists
-from scipy.interpolate import interp1d
+from scipy.constants import speed_of_light
+from scipy.interpolate import interp1d, splev, splrep
 from scipy.optimize import curve_fit
+from scipy.signal import correlate
 from scipy.special import binom
 from tqdm import tqdm
 
 from .stats import cohen_d, gauss, gaussfit
-from .sysrem import Sysrem
+from .sysrem import Sysrem, SysremWithProjection
+
+# Speed of light in km/s
+c_light = speed_of_light * 1e-3
 
 # TODO List:
 # - automatically mask points before fitting with SME
@@ -43,6 +49,7 @@ def coadd_cross_correlation(
     times: Time,
     planet: Planet,
     data_dir: str = None,
+    cache_suffix: str = "",
     load: bool = True,
 ):
     """Sum the cross correlation data along the expected planet trajectory
@@ -74,7 +81,9 @@ def coadd_cross_correlation(
         sum of cross correlation data, out of the transit
     """
     if data_dir is not None:
-        savefilename = join(data_dir, "../medium/cross_correlation_coadd.npz")
+        savefilename = realpath(
+            join(data_dir, f"../medium/cross_correlation_coadd{cache_suffix}.npz")
+        )
         if load and exists(savefilename):
             data = np.load(savefilename)
             coadd_sum = data["coadd_sum"]
@@ -82,13 +91,11 @@ def coadd_cross_correlation(
             coadd_sum_oot = data["coadd_sum_oot"]
             return coadd_sum, coadd_sum_it, coadd_sum_oot
 
-    mid = cc_data.shape[-1] // 2
-    offset = 3
     cc_data_interp = np.zeros_like(cc_data)
-    for i in range(len(cc_data)):
-        for j in range(len(cc_data[0])):
+    for i in tqdm(range(len(cc_data)), leave=False):
+        for j in tqdm(range(len(cc_data[0])), leave=False):
             # -3 and +4 is the same bc of how python does things
-            cc_data[i, j, mid - offset : mid + offset + 1] = 0
+            # cc_data[i, j, mid - offset : mid + offset + 1] = 0
             cc_data_interp[i, j] = np.interp(
                 rv_array - (rv[i] - rv[j]).to_value("km/s"), rv_array, cc_data[i, j]
             )
@@ -124,15 +131,18 @@ def run_cross_correlation(
     skip: Tuple = None,
     load: bool = False,
     data_dir: str = None,
+    rv_star: np.ndarray = None,
+    rv_planet: np.ndarray = None,
+    airmass: np.ndarray = None,
+    spec: np.ndarray = None,
+    cache_suffix="",
 ):
-    wave, flux, uncs, times, segments = data
-    rv_points = int(2 * rv_range / rv_step + 1)
-
-    if np.isscalar(nsysrem):
-        nsysrem = (nsysrem,)
+    wave, flux, uncs, _, segments, _ = data
 
     if data_dir is not None:
-        savefilename = join(data_dir, "../medium/cross_correlation.npz")
+        savefilename = realpath(
+            join(data_dir, f"../medium/cross_correlation{cache_suffix}.npz")
+        )
         if load and exists(savefilename):
             data = np.load(savefilename)
             if "rv_array" in data:
@@ -155,86 +165,143 @@ def run_cross_correlation(
         uncs = np.ones_like(flux)
     elif isinstance(uncs, u.Quantity):
         uncs = uncs.to_value(1)
+    if rv_planet is not None and isinstance(rv_planet, u.Quantity):
+        rv_planet = rv_planet.to_value(u.km / u.s)
+    if rv_star is not None and isinstance(rv_star, u.Quantity):
+        rv_star = rv_star.to_value(u.km / u.s)
 
-    correlation = {}
-    sysrem = Sysrem(flux, uncs)
-    for n in tqdm(nsysrem, desc="Sysrem N"):
-        corrected_flux, _ = sysrem.run(n)
+    n = flux.shape[0] // 2
+    spec = flux[n]
+    uncs = np.clip(uncs, 1, None)
+    for low, upp in zip(segments[:-1], segments[1:]):
+        # flux[:, low:upp] -= np.nanmin(flux[:, low:upp])
+        flux[:, low:upp] /= np.nanmax(flux[:, low:upp])
 
-        # Normalize by the standard deviation in this wavelength column
-        std = np.nanstd(corrected_flux, axis=0)
-        std[std == 0] = 1
-        corrected_flux /= std
+    # corrected_flux = np.load("corrected_flux_LTT1445A_projected_1.npy")
+    sysrem = SysremWithProjection(wave[n], flux, spec, rv_star, airmass, uncs)
+    corrected_flux, *_ = sysrem.run(nsysrem)
 
-        # reference_flux = np.copy(reference.flux.to_value(1))
-        # reference_flux -= np.nanmean(reference_flux, axis=1)[:, None]
-        # reference_flux /= np.nanstd(reference_flux, axis=1)[:, None]
-        wave_noshift = wave[0]
-        c_light = c.to_value("km/s")
+    # sysrem = Sysrem(corrected_flux)
+    # corrected_flux, *_ = sysrem.run(nsysrem-1)
+    np.save("corrected_flux_LTT1445A_projected_1.npy", corrected_flux)
 
-        # Run the cross correlation for all times and radial velocity offsets
-        corr = np.zeros((flux.shape[0], flux.shape[0], int(rv_points)))
-        total = int(binom(flux.shape[0], 2))
-        for i, j in tqdm(
-            combinations(range(flux.shape[0]), 2), total=total, desc="Combinations"
-        ):
-            rv_array = np.zeros(rv_points)
-            for k in tqdm(
-                range(rv_points),
-                leave=False,
-                desc="radial velocity",
-            ):
-                # Doppler Shift the next spectrum
-                # keep the inter order gaps as NaN
-                # so we don't get cross correlations there
-                rv = -rv_range + k * rv_step
-                rv_array[k] = rv
-                wave_shift = wave_noshift * (1 + rv / c_light)
-                newspectra = np.copy(corrected_flux[j])
-                for low, upp in zip(segments[:-1], segments[1:]):
-                    newspectra[low:upp] = np.interp(
-                        wave_shift[low:upp],
-                        wave_noshift[low:upp],
-                        corrected_flux[j, low:upp],
-                        left=np.nan,
-                        right=np.nan,
-                    )
+    # Normalize by the standard deviation in this wavelength column
+    std = np.nanstd(corrected_flux, axis=0)
+    std[std == 0] = 1
+    corrected_flux /= std
 
-                # Mask bad pixels
-                m = np.isfinite(corrected_flux[i])
-                m &= np.isfinite(newspectra)
-                m &= skip_mask
+    rv_array = np.linspace(-10, 10, flux.shape[1])
 
-                # Cross correlate!
-                corr[i, j, k] += np.correlate(
-                    corrected_flux[i][m],
-                    newspectra[m],
-                    "valid",
-                )
-                # Normalize to the number of data points used
-                corr[i, j, k] *= m.size / np.count_nonzero(m)
+    spl = [None] * flux.shape[0]
+    for i in range(flux.shape[0]):
+        spl[i] = splrep(wave[i], corrected_flux[i])
 
-        # Add up cross correlation between different sides
-        # for i in range(flux.shape[0]):
-        #     corr[i] += corr[:, i, ::-1]
-        #     corr[i] /= np.median(corr[i], axis=1)[:, None]
-        #     corr[i] = np.nan_to_num(corr[i], nan=0)
+    # Run the cross correlation for all times and radial velocity offsets
+    corr = np.zeros((flux.shape[0], flux.shape[0], flux.shape[1]), dtype="f4")
+    total = int(binom(flux.shape[0], 2))
+    for i, j in tqdm(
+        combinations(range(flux.shape[0]), 2), total=total, desc="Combinations"
+    ):
+        # Zero Normalized Cross Correlation
+        a = corrected_flux[i]
+        v = corrected_flux[j]
 
-        # mid = flux.shape[0] // 2
-        # ccf = np.copy(corr[mid])
-        # for i in range(1, mid):
-        #     ccf[:-i] += corr[mid + i, i:]
-        # for i in range(1, mid):
-        #     ccf[i:] += corr[mid - i, :-i]
+        for k in range(-100, 100, 1):
+            pass
 
-        # plt.imshow(ccf, aspect="auto", origin="lower")
-        # plt.show()
+        if rv_planet is not None:
+            rva = 1 - rv_planet[i] / c_light
+            rvv = 1 - rv_planet[j] / c_light
+            a = splev(wave[n] * rva, spl[i])
+            v = splev(wave[n] * rvv, spl[j])
+            # a = interp1d(wave[i] * rva, a, kind="linear", fill_value=1, bounds_error=False)(wave[n])
+            # v = interp1d(wave[j] * rvv, v, kind="linear", fill_value=1, bounds_error=False)(wave[n])
 
-        correlation[str(n)] = corr
+        a = (a - np.mean(a)) / (np.std(a) * len(a))
+        v = (v - np.mean(v)) / (np.std(v))
+        corr[i, j] = correlate(a, v, mode="same")
+
+    correlation = {str(nsysrem): corr}
+    # correlation[:, :, flux.shape[1] // 2] = np.nan
 
     if data_dir is not None:
         np.savez(savefilename, **correlation, rv_array=rv_array)
     return correlation, rv_array
+
+
+def cross_correlation_reference(wave, ptr_wave, ptr_flux, rv_range=100, rv_step=1):
+    rv_points = int((2 * rv_range + 1) / rv_step)
+    rv = np.linspace(-rv_range, rv_range, num=rv_points)
+    rep = splrep(ptr_wave, ptr_flux)
+    reference = np.zeros((rv_points, wave.size))
+    for i in tqdm(range(rv_points)):
+        rv_factor = np.sqrt((1 - rv[i] / c_light) / (1 + rv[i] / c_light))
+        ref = splev(wave * rv_factor, rep)
+        reference[i] = np.nan_to_num(ref)
+
+    return reference
+
+
+def run_cross_correlation_ptr(
+    corrected_flux: np.ndarray,
+    reference: np.ndarray,
+    segments: np.ndarray,
+    rv_range: float = 100,
+    rv_step: float = 1,
+    skip: Tuple = None,
+    load: bool = False,
+    data_dir: str = None,
+    cache_suffix: str = "",
+):
+    rv_points = int(2 * rv_range / rv_step + 1)
+
+    if data_dir is not None:
+        savefilename = realpath(
+            join(data_dir, f"../medium/cross_correlation{cache_suffix}.npz")
+        )
+        if load and exists(savefilename):
+            data = np.load(savefilename)
+            if "rv_array" in data:
+                rv_array = data["rv_array"]
+            else:
+                rv_array = np.arange(-rv_range, rv_range + rv_step, rv_step)
+            return data, rv_array
+
+    skip_mask = np.full(corrected_flux.shape[1], True)
+    if skip is not None:
+        for seg in skip:
+            skip_mask[segments[seg] : segments[seg + 1]] = False
+
+    # reference = cross_correlation_reference
+    if isinstance(corrected_flux, u.Quantity):
+        corrected_flux = corrected_flux.to_value(1)
+
+    rv_array = np.linspace(-rv_range, rv_range, rv_points)
+    nseg = len(segments) - 1
+    nobs = corrected_flux.shape[0]
+
+    # Run the cross correlation for all times and radial velocity offsets
+    corr = np.zeros((nseg, nobs, rv_points))
+    for k, (low, upp) in tqdm(
+        enumerate(zip(segments[:-1], segments[1:])),
+        total=len(segments) - 1,
+        desc="Segment",
+    ):
+        for i in tqdm(range(nobs), total=nobs, desc="Obs", leave=False):
+            for j in tqdm(
+                range(rv_points), leave=False, desc="rv points", total=rv_points
+            ):
+                # Zero Normalized Cross Correlation
+                a = corrected_flux[i, low:upp]
+                v = reference[j, low:upp]
+
+                a = (a - np.nanmean(a)) / np.nanstd(a)
+                v = (v - np.nanmean(v)) / np.nanstd(v)
+                corr[k, i, j] += np.nanmean(a * v)
+
+    if data_dir is not None:
+        np.savez(savefilename, corr=corr, rv_array=rv_array)
+    return corr, rv_array
 
 
 def calculate_cohen_d_for_dataset(
@@ -523,11 +590,12 @@ def load_data(data_dir, load=False):
         uncslist = data["uncs"]
         times = Time(data["time"])
         segments = data["segments"]
-        return wavelist, fluxlist, uncslist, times, segments
+        header = data["header"]
+        return wavelist, fluxlist, uncslist, times, segments, header
 
     files_fname = join(data_dir, "*.fits")
     files = glob(files_fname)
-    additional_data_fname = join(data_dir, "*.csv")
+    additional_data_fname = join(data_dir, "../*.csv")
     try:
         additional_data = glob(additional_data_fname)[0]
         additional_data = pd.read_csv(additional_data)
@@ -538,6 +606,7 @@ def load_data(data_dir, load=False):
     for f in tqdm(files):
         i = int(basename(f)[-8:-5])
         hdu = fits.open(f)
+        header = hdu[0].header
         wave = hdu[1].data << u.AA
         flux = hdu[2].data
 
@@ -586,6 +655,7 @@ def load_data(data_dir, load=False):
     times = times[sort]
 
     savefilename = join(data_dir, "../medium/spectra.npz")
+    makedirs(dirname(savefilename), exist_ok=True)
     np.savez(
         savefilename,
         flux=fluxlist,
@@ -593,5 +663,6 @@ def load_data(data_dir, load=False):
         uncs=uncslist,
         time=times,
         segments=segments,
+        header=header,
     )
-    return wavelist, fluxlist, uncslist, times, segments
+    return wavelist, fluxlist, uncslist, times, segments, header

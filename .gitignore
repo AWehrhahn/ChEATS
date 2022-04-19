@@ -9,3 +9,14 @@
 exoplanet_transit_snr/_*.html
 exoplanet_transit_snr/_*.c
 syntherr.log
+
+# Molecfit products
+telluriccorr_tmp_folder_*/
+examples/data/
+ATM_PARAMETERS.fits
+BEST_FIT_PARAMETERS.fits
+MODEL_CHIPS_COMBINED.fits
+MODEL_MOLECULES.fits
+MOLECFIT_DATA.fits
+BEST_FIT_MODEL.fits
+WAVE_INCLUDE.fits

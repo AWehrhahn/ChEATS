@@ -12,12 +12,15 @@ from exoplanet_transit_snr.snr_estimate import (
 )
 from exoplanet_transit_snr.stellardb import StellarDb
 
+
 def coadd_cross_correlation(cc_data, rv, rv_array):
     cc_data_interp = np.zeros_like(cc_data)
     for i in range(len(cc_data)):
         for j in range(len(cc_data[0])):
-            cc_data[i,j,800-3:800+4]=0
-            cc_data_interp[i,j] = np.interp(rv_array-(rv[i]-rv[j]).to_value("km/s"), rv_array, cc_data[i,j])
+            cc_data[i, j, 800 - 3 : 800 + 4] = 0
+            cc_data_interp[i, j] = np.interp(
+                rv_array - (rv[i] - rv[j]).to_value("km/s"), rv_array, cc_data[i, j]
+            )
     # Co-add to sort of stack them together
     coadd_sum = np.sum(cc_data_interp, axis=(0, 1))
     return coadd_sum
@@ -48,6 +51,16 @@ for snr in [200]:
     data = load_data(data_dir, load=True)
     wave, flux, uncs, times, segments = data
 
+    phi = (times - planet.time_of_transit) / planet.period
+    phi = phi.to_value(1)
+    phi = phi % 1
+    ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    in_transit = (phi >= ingress) | (phi <= egress)
+    out_transit = ~in_transit
+
+    rv = orbit.radial_velocity_planet(times)
+
     # Run the cross correlation to the next neighbour
     cc_data, rv_array = run_cross_correlation(
         data,
@@ -58,12 +71,20 @@ for snr in [200]:
         data_dir=data_dir,
     )
 
+    phi = (times - planet.time_of_transit) / planet.period
+    phi = phi.to_value(1)
+    phi = phi % 1
+    ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    in_transit = (phi >= ingress) | (phi <= egress)
+    out_transit = ~in_transit
+
     rv = orbit.radial_velocity_planet(times)
     cc_data = cc_data["10"]
     cc_data_coadd = coadd_cross_correlation(cc_data, rv, rv_array)
-    
-    #cc_data_coadd,cc_data_coadd_it,cc_data_coadd_oot = coadd_cross_correlation(cc_data, rv, rv_array)
-    
-    plt.plot(rv_array,cc_data_coadd)
+
+    # cc_data_coadd,cc_data_coadd_it,cc_data_coadd_oot = coadd_cross_correlation(cc_data, rv, rv_array)
+
+    plt.plot(rv_array, cc_data_coadd)
     plt.title
     plt.show()

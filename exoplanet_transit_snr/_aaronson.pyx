@@ -1,8 +1,11 @@
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+
 cimport cython
 cimport numpy as np
 
 import numpy as np
-from scipy.sparse import lil_array
+from scipy.sparse import coo_array
+from tqdm import tqdm
 
 from libc.math cimport sqrt
 
@@ -26,33 +29,55 @@ def _projection_matrix(double[:, ::1] wave_shifted, double[:, ::1] wave_to, doub
     cdef Py_ssize_t[:] digits
     cdef Py_ssize_t d
     cdef double w, tmp, w0, w1
+    cdef double[:] data = np.empty(2 * nwave, dtype=DTYPE)
+    cdef Py_ssize_t[:] idx_i = np.empty(2 * nwave, dtype=int)
+    cdef Py_ssize_t[:] idx_j = np.empty(2 * nwave, dtype=int)
 
-    proj = [lil_array((nwave, nwave)) for _ in range(nrv)]
+    proj = [None for _ in range(nrv)]
 
-    for j in range(nrv):
-        digits = np.digitize(wave_shifted[j], wave_to[j])
+    for j in tqdm(range(nrv), total=nrv):
+        digits = np.digitize(wave_to[j], wave_shifted[j])
         for i in range(nwave):
             d = digits[i]
             w = wave_to[j, i]
-            if d >= 0 and d < nwave - 1:
-                w0 = wave_shifted[j, d]
-                w1 = wave_shifted[j, d+1]
+            if (d > 0) and (d < nwave):
+                w0 = wave_shifted[j, d - 1]
+                w1 = wave_shifted[j, d]
                 tmp = (w - w0) / (w1 - w0)
-                proj[j][i, d] = 1 - tmp
-                proj[j][i, d + 1] = tmp
-            elif d >= nwave - 1:
+                # Fill the arrays
+                data[2*i] = 1 - tmp
+                idx_i[2*i] = i
+                idx_j[2*i] = d - 1
+
+                data[2*i+1] = tmp
+                idx_i[2*i+1] = i
+                idx_j[2*i+1] = d
+            elif d >= nwave:
                 w0 = wave_shifted[j, -2]
                 w1 = wave_shifted[j, -1]
                 tmp = (w - w0) / (w1 - w0)
-                proj[j][i, -2] = 1 - tmp
-                proj[j][i, -1] = tmp
-            else: # d < 0
+                # Fill the arrays
+                data[2*i] = 1 - tmp
+                idx_i[2*i] = i
+                idx_j[2*i] = nwave-2
+
+                data[2*i+1] = tmp
+                idx_i[2*i+1] = i
+                idx_j[2*i+1] = nwave-1
+            else: # d <= 0
                 w0 = wave_shifted[j, 0]
                 w1 = wave_shifted[j, 1]
                 tmp = (w - w0) / (w1 - w0)
-                proj[j][i, 0] = 1 - tmp
-                proj[j][i, 1] = tmp
-        proj[j] = proj[j].tocsc()
+                # Fill the arrays
+                data[2*i] = 1 - tmp
+                idx_i[2*i] = i
+                idx_j[2*i] = 0
+
+                data[2*i+1] = tmp
+                idx_i[2*i+1] = i
+                idx_j[2*i+1] = 1
+
+        proj[j] = coo_array((data, (idx_i, idx_j)), shape=(nwave, nwave)).tocsc(copy=True)
         # To test that proj works as exped we can use this:
         # np.all(np.isclose((proj[j] @ wave_from), wave_from.value * rv_factor[j]))
     return proj
