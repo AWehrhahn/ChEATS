@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 from glob import glob
 from os.path import basename, dirname, exists, join, realpath
 
@@ -12,21 +13,14 @@ from astropy.io import fits
 from astropy.time import Time
 from cache_decorator import Cache as cache
 from exoorbit.orbit import Orbit
-from molecfit_wrapper.molecfit import Molecfit
 from scipy.constants import speed_of_light
-from scipy.ndimage import median_filter
-from scipy.optimize import least_squares
-from sklearn import gaussian_process
 from tqdm import tqdm
 
 from exoplanet_transit_snr.petitradtrans import petitRADTRANS
 from exoplanet_transit_snr.snr_estimate import (
-    coadd_cross_correlation,
     cross_correlation_reference,
-    run_cross_correlation,
     run_cross_correlation_ptr,
 )
-from exoplanet_transit_snr.stats import gaussfit
 from exoplanet_transit_snr.stellardb import StellarDb
 from exoplanet_transit_snr.sysrem import Sysrem, SysremWithProjection
 
@@ -132,6 +126,45 @@ def load_data(data_dir, load=False):
     return wavelist, fluxlist, uncslist, times, segments, header
 
 
+def correct_data(data, airmass):
+    wave, flux, uncs, times, segments, header = data
+
+    for low, upp in zip(segments[:-1], segments[1:]):
+        flux[:, low:upp] /= np.nanmedian(flux[:, low:upp])
+        flux[:, low : low + 20] = np.nan
+        flux[:, upp - 20 : upp] = np.nan
+
+    # Sort the segments by wavelength
+    for i in range(len(wave)):
+        sort = np.argsort(wave[i])
+        wave[i] = wave[i][sort]
+        flux[i] = flux[i][sort]
+        uncs[i] = uncs[i][sort]
+
+    # Find outliers by comparing with the median observation
+    # correct for the scaling between observations with the factor r
+    spec = np.nanmedian(flux, axis=0)
+    std = np.nanmedian(np.abs(np.nanmedian(flux - spec) - (flux - spec)))
+    for i in range(len(flux)):
+        r = np.nanmedian(flux[i] / spec)
+        idx = np.abs(flux[i] - r * spec) > 3 * std
+        flux[i, idx] = r * spec[idx]
+
+    flux = np.nan_to_num(flux, nan=1, posinf=1, neginf=1, copy=False)
+    uncs = np.nan_to_num(uncs, nan=1, posinf=1, neginf=1, copy=False)
+    uncs = np.clip(uncs, 1, None)
+
+    # Correct for airmass
+    mean = np.nanmean(flux, axis=1)
+    c0 = np.polyfit(airmass, mean, 1)
+    # # res = least_squares(lambda c: np.polyval(c, airmass) - mean, c0, loss="soft_l1")
+    ratio = np.polyval(c0, airmass)
+    flux /= (mean * ratio)[:, None]
+
+    data = wave, flux, uncs, times, segments, header
+    return data
+
+
 # define the names of the star and planet
 # as well as the datasets within the datasets folder
 star, planet = "WASP-107", "b"
@@ -153,58 +186,37 @@ telescope = EarthLocation.of_site("Paranal")
 rv_range = 200
 rv_step = 0.25
 
+if len(sys.argv) > 1:
+    n1 = int(sys.argv[1])
+    n2 = int(sys.argv[2])
+else:
+    n1, n2 = 1, 1
+
 # Where to find the data, might need to be adjusted
 data_dir = "/DATA/ESO/CRIRES+/GTO/220310_WASP107/1xAB_??"
 # load the data from the fits files, returns several objects
-data = load_data(data_dir, load=False)
+data = load_data(data_dir, load=True)
 wave, flux, uncs, times, segments, header = data
 wave *= u.nm.to(u.AA)
 
+# remove last segment, because it is bad, too many tellurics
 flux = flux[:, :-2048]
 wave = wave[:, :-2048]
 uncs = uncs[:, :-2048]
 segments = segments[:-1]
-for low, upp in zip(segments[:-1], segments[1:]):
-    flux[:, low:upp] /= np.nanmedian(flux[:, low:upp])
-    flux[:, low : low + 20] = np.nan
-    flux[:, upp - 20 : upp] = np.nan
-    # for i in range(len(flux)):
-    #     blurred = median_filter(flux[i, low:upp], 5) - flux[i, low:upp]
-    #     flux[i, low:upp][blurred < np.nanstd(blurred) * 5] = np.nan
+data = wave, flux, uncs, times, segments, header
 
-for i in range(len(wave)):
-    sort = np.argsort(wave[i])
-    wave[i] = wave[i][sort]
-    flux[i] = flux[i][sort]
-    uncs[i] = uncs[i][sort]
-
-spec = np.nanmedian(flux, axis=0)
-std = np.nanmedian(np.abs(np.nanmedian(flux - spec) - (flux - spec)))
-for i in range(len(flux)):
-    r = np.nanmedian(flux[i] / spec)
-    idx = np.abs(flux[i] - r * spec) > 3 * std
-    flux[i, idx] = r * spec[idx]
-
-flux = np.nan_to_num(flux, nan=1, posinf=1, neginf=1, copy=False)
-uncs = np.nan_to_num(uncs, nan=1, posinf=1, neginf=1, copy=False)
-n = flux.shape[0] // 2
-uncs = np.clip(uncs, 1, None)
-
-# Correct for airmass and seeing
+# Calculate airmass
 altaz = star.coordinates.transform_to(AltAz(obstime=times, location=telescope))
 airmass = altaz.secz.value
 
-mean = np.nanmean(flux, axis=1)
-c0 = np.polyfit(airmass, mean, 1)
-# # res = least_squares(lambda c: np.polyval(c, airmass) - mean, c0, loss="soft_l1")
-ratio = np.polyval(c0, airmass)
-flux /= (mean * ratio)[:, None]
+# Correct outliers, basic continuum normalization
+data = correct_data(data, airmass)
+wave, flux, uncs, times, segments, header = data
 
 # estimate tellurics and spectrum contribution
-tell, spec = np.polyfit(airmass - 1, flux, 1)
-tell += 1
-
-data = wave, flux, uncs, times, segments, header
+# tell, spec = np.polyfit(airmass - 1, flux, 1)
+# tell += 1
 
 
 @cache(cache_path=f"/tmp/{star.name}_{planet.name}.npz")
@@ -221,6 +233,7 @@ def ptr_spec(wave, star, planet, rv_range):
 # clear_cache(ptr_spec, (wave, star, planet, rv_range))
 ptr_wave, ptr_flux = ptr_spec(wave, star, planet, rv_range)
 if hasattr(ptr_wave, "unit"):
+    # ptr_wave gets saved without the quantity information by the cache
     ptr_wave = ptr_wave.to_value(u.um)
 ptr_wave *= u.um.to(u.AA)
 
@@ -233,8 +246,9 @@ def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
     return ref
 
 
+n = wave.shape[0] // 2
 # clear_cache(ptr_ref, (wave[16], ptr_wave, ptr_flux, rv_range, rv_step))
-ref = ptr_ref(wave[16], ptr_wave, ptr_flux, rv_range, rv_step)
+ref = ptr_ref(wave[n], ptr_wave, ptr_flux, rv_range, rv_step)
 ref -= np.nanmin(ref, axis=1)[:, None]
 ref /= np.nanmax(ref, axis=1)[:, None]
 
@@ -247,9 +261,14 @@ rv_bary = rv_bary.to_value("km/s")
 
 
 # Run SYSREM
-@cache(cache_path=f"/tmp/sysrem_{star.name}_{planet.name}.npz")
+
+rp = realpath(join(dirname(__file__), ".."))
+
+
+@cache(cache_path=f"{rp}/sysrem_{{n1}}_{{n2}}_{star.name}_{planet.name}.npz")
 def run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass):
     corrected_flux = np.zeros_like(flux)
+    n = wave.shape[0] // 2
     for low, upp in zip(segments[:-1], segments[1:]):
         sysrem = SysremWithProjection(
             wave[n, low:upp], flux[:, low:upp], rv_bary, airmass, uncs[:, low:upp]
@@ -260,8 +279,11 @@ def run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass):
     return corrected_flux
 
 
-clear_cache(run_sysrem, (flux, uncs, segments, 1, 15, rv_bary, airmass))
-corrected_flux = run_sysrem(flux, uncs, segments, 1, 15, rv_bary, airmass)
+# Run Sysrem
+# the first number is the number of sysrem iterations accounting for the barycentric velocity
+# the second is for regular sysrem iterations
+# clear_cache(run_sysrem, (flux, uncs, segments, n1, n2, rv_bary, airmass))
+corrected_flux = run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass)
 
 # Normalize by the standard deviation in this wavelength column
 corrected_flux -= np.nanmean(corrected_flux, axis=0)
@@ -269,43 +291,47 @@ std = np.nanstd(corrected_flux, axis=0)
 std[std == 0] = 1
 corrected_flux /= std
 
-# Run the cross correlation to the next neighbour
-cache_suffix = f"_{star.name}_{planet.name}".lower().replace(" ", "_")
+# Run the cross correlation between the sysrem residuals and the expected planet spectrum
+cache_suffix = f"_{n1}_{n2}_{star.name}_{planet.name}".lower().replace(" ", "_")
 cc_data, rv_array = run_cross_correlation_ptr(
     corrected_flux,
     ref,
     segments,
     rv_range=rv_range,
     rv_step=rv_step,
-    load=False,
+    load=True,
     data_dir=data_dir,
     cache_suffix=cache_suffix,
 )
 
+# Normalize the cross correlation of each segment
 cc_data -= np.nanmean(cc_data, axis=(1, 2))[:, None, None]
 cc_data /= np.nanstd(cc_data, axis=(1, 2))[:, None, None]
 
 # Plot the cross correlation
-for i in range(17):
+plot_fname = f"ccresult_{star.name}_{planet.name}_{n1}_{n2}.png"
+for i in range(cc_data.shape[0]):
     plt.subplot(6, 3, i + 1)
     plt.imshow(cc_data[i], aspect="auto")
-plt.show()
+plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}")
+plt.savefig(plot_fname)
+# plt.show()
 
-# Plot the results
-rv_points = int(2 * rv_range / rv_step + 1)
-phi = (times - planet.time_of_transit) / planet.period
-phi = phi.to_value(1)
-phi = phi % 1
-vsys = star.radial_velocity.to_value("km/s")
-kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
-vp = vsys - kp * np.sin(2 * np.pi * phi)
-vp_idx = np.interp(vp, rv_array, np.arange(rv_points))
+# # Plot the results
+# rv_points = int(2 * rv_range / rv_step + 1)
+# phi = (times - planet.time_of_transit) / planet.period
+# phi = phi.to_value(1)
+# phi = phi % 1
+# vsys = star.radial_velocity.to_value("km/s")
+# kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
+# vp = vsys - kp * np.sin(2 * np.pi * phi)
+# vp_idx = np.interp(vp, rv_array, np.arange(rv_points))
 
-plt.imshow(np.nansum(cc_data, axis=0), aspect="auto")
-plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.show()
+# plt.imshow(np.nansum(cc_data, axis=0), aspect="auto")
+# plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
+# plt.show()
 
-
+# pass
 # # Coadd all the ccfs together
 # rv = orbit.radial_velocity_planet(times)
 # cc_data_coadd, cc_it, cc_oot = coadd_cross_correlation(
