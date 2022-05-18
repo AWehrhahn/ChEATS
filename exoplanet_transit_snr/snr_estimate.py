@@ -261,10 +261,8 @@ def run_cross_correlation_ptr(
         )
         if load and exists(savefilename):
             data = np.load(savefilename)
-            if "rv_array" in data:
-                rv_array = data["rv_array"]
-            else:
-                rv_array = np.arange(-rv_range, rv_range + rv_step, rv_step)
+            rv_array = data["rv_array"]
+            data = data["corr"]
             return data, rv_array
 
     skip_mask = np.full(corrected_flux.shape[1], True)
@@ -295,9 +293,12 @@ def run_cross_correlation_ptr(
                 a = corrected_flux[i, low:upp]
                 v = reference[j, low:upp]
 
-                a = (a - np.nanmean(a)) / np.nanstd(a)
-                v = (v - np.nanmean(v)) / np.nanstd(v)
-                corr[k, i, j] += np.nanmean(a * v)
+                corr[k, i, j] += np.nansum(a * v)
+                corr[k, i, j] *= corr[k, i, j].size / np.count_nonzero(corr[k, i, j])
+
+                # a = (a - np.nanmean(a)) / np.nanstd(a)
+                # v = (v - np.nanmean(v)) / np.nanstd(v)
+                # corr[k, i, j] += np.nanmean(a * v)
 
     if data_dir is not None:
         np.savez(savefilename, corr=corr, rv_array=rv_array)
@@ -305,18 +306,15 @@ def run_cross_correlation_ptr(
 
 
 def calculate_cohen_d_for_dataset(
-    spectra,
     data,
+    datetime,
     star,
     planet,
     rv_range=100,
     rv_step=1,
-    sysrem="7",
     plot=True,
     title="",
 ):
-    wave, flux, uncs, datetime, segments = spectra
-
     phi = (datetime - planet.time_of_transit) / planet.period
     phi = phi.to_value(1)
     # We only care about the fraction
@@ -330,10 +328,9 @@ def calculate_cohen_d_for_dataset(
     egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
     in_transit = (phi >= ingress) | (phi <= egress)
 
-    data = data[str(sysrem)]
     rv_points = int(2 * rv_range / rv_step + 1)
     rv = np.linspace(-rv_range, rv_range, rv_points)
-    vp_idx = np.interp(vp, rv, np.arange(rv.size))
+    # vp_idx = np.interp(vp, rv, np.arange(rv.size))
 
     if plot:
         vmin, vmax = np.nanpercentile(data.ravel(), [5, 95])
@@ -444,31 +441,32 @@ def calculate_cohen_d_for_dataset(
     kp_width = int(20 / rv_step)  # +-10 km/s
 
     if plot:
-        vsys_peak_low = vsys[max(vsys_peak - vsys_width, 0)]
-        vsys_peak_upp = vsys[min(vsys_peak + vsys_width, len(vsys) - 1)]
-        kp_peak_low = kp[max(kp_peak - kp_width, 0)]
-        kp_peak_upp = kp[min(kp_peak + kp_width, len(kp) - 1)]
+        # vsys_peak_low = vsys[max(vsys_peak - vsys_width, 0)]
+        # vsys_peak_upp = vsys[min(vsys_peak + vsys_width, len(vsys) - 1)]
+        # kp_peak_low = kp[max(kp_peak - kp_width, 0)]
+        # kp_peak_upp = kp[min(kp_peak + kp_width, len(kp) - 1)]
 
         vp_new = vsys[vsys_peak] + kp[kp_peak] * np.sin(2 * np.pi * phi)
-        vp_low_low = vsys_peak_low + kp_peak_low * np.sin(2 * np.pi * phi)
-        vp_low_upp = vsys_peak_low + kp_peak_upp * np.sin(2 * np.pi * phi)
-        vp_upp_low = vsys_peak_upp + kp_peak_low * np.sin(2 * np.pi * phi)
-        vp_upp_upp = vsys_peak_upp + kp_peak_upp * np.sin(2 * np.pi * phi)
-        vp_low = np.min([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
-        vp_upp = np.max([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
+        # vp_low_low = vsys_peak_low + kp_peak_low * np.sin(2 * np.pi * phi)
+        # vp_low_upp = vsys_peak_low + kp_peak_upp * np.sin(2 * np.pi * phi)
+        # vp_upp_low = vsys_peak_upp + kp_peak_low * np.sin(2 * np.pi * phi)
+        # vp_upp_upp = vsys_peak_upp + kp_peak_upp * np.sin(2 * np.pi * phi)
+        # vp_low = np.min([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
+        # vp_upp = np.max([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
 
         vp_idx_new = np.interp(vp_new, rv, np.arange(rv.size))
-        vp_idx_low = np.interp(vp_low, rv, np.arange(rv.size))
-        vp_idx_upp = np.interp(vp_upp, rv, np.arange(rv.size))
+        # vp_idx_low = np.interp(vp_low, rv, np.arange(rv.size))
+        # vp_idx_upp = np.interp(vp_upp, rv, np.arange(rv.size))
+        vmin, vmax = np.nanpercentile(data.ravel(), [5, 95])
 
-        plt.imshow(data, aspect="auto", origin="lower")
+        plt.imshow(data, aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
         plt.xlabel("rv [km/s]")
         xticks = plt.xticks()[0][1:-1]
         rv_ticks = np.linspace(xticks[0], xticks[-1], len(rv))
         xticks_labels = np.interp(xticks, rv_ticks, rv)
         xticks_labels = [f"{x:.3g}" for x in xticks_labels]
         plt.xticks(xticks, labels=xticks_labels)
-        plt.plot(vp_idx, np.arange(data.shape[0]), "r-.")
+        # plt.plot(vp_idx, np.arange(data.shape[0]), "r-.")
         plt.plot(vp_idx_new, np.arange(data.shape[0]), "k-.")
         plt.hlines(
             np.arange(data.shape[0])[in_transit][0],
@@ -484,13 +482,13 @@ def calculate_cohen_d_for_dataset(
             "k",
             "--",
         )
-        plt.fill_betweenx(
-            np.arange(data.shape[0]),
-            vp_idx_low,
-            vp_idx_upp,
-            color="tab:orange",
-            alpha=0.5,
-        )
+        # plt.fill_betweenx(
+        #     np.arange(data.shape[0]),
+        #     vp_idx_low,
+        #     vp_idx_upp,
+        #     color="tab:orange",
+        #     alpha=0.5,
+        # )
         plt.xlim(-0.5, data.shape[1] + 0.5)
         plt.title(title)
         plt.show()

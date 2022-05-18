@@ -8,6 +8,7 @@
 *.lin
 /1/
 *.log
+*.png
 
 exoplanet_transit_snr/_*.html
 exoplanet_transit_snr/_*.c
@@ -23,3 +24,16 @@ MODEL_MOLECULES.fits
 MOLECFIT_DATA.fits
 BEST_FIT_MODEL.fits
 WAVE_INCLUDE.fits
+.logfile
+input_spectrum.fits
+*.rc
+*.sof
+ATM_PROFILE_COMBINED.fits
+ATM_PROFILE_STANDARD.fits
+CALCTRANS_CHIPS_COMBINED.fits
+GDAS_AFTER.fits
+GDAS_BEFORE.fits
+GDAS.fits
+LBLRTM_RESULTS.fits
+TELLURIC_CORR.fits
+TELLURIC_DATA.fits

@@ -55,14 +55,18 @@ def load_data(data_dir, load=False):
         header = data["header"]
         return wavelist, fluxlist, uncslist, times, segments, header
 
-    files_fname = join(data_dir, "cr2res_obs_nodding_extracted_combined.fits")
+    files_fname = join(data_dir, "*.fits")
     files = glob(files_fname)
 
-    flat_data_dir = "/DATA/ESO/CRIRES+/GTO/211028_LTTS1445Ab/??"
-    flat_fname = realpath(
-        join(flat_data_dir, "../cr2res_util_calib_calibrated_collapsed_extr1D.fits")
-    )
-    flat = fits.open(flat_fname)
+    add_fname = join(data_dir, "*.csv")
+    add_fname = glob(add_fname)[0]
+    add = pd.read_csv(add_fname)
+
+    # flat_data_dir = "/DATA/ESO/CRIRES+/GTO/211028_LTTS1445Ab/??"
+    # flat_fname = realpath(
+    #     join(flat_data_dir, "../cr2res_util_calib_calibrated_collapsed_extr1D.fits")
+    # )
+    # flat = fits.open(flat_fname)
 
     fluxlist, wavelist, uncslist, times = [], [], [], []
     for f in tqdm(files):
@@ -72,59 +76,32 @@ def load_data(data_dir, load=False):
         # i.e. the header info is ONLY the info from the first observation
         # in the sequence. Thus we add the expsoure time to get the center
         # of the four observations
-        time = Time(header["MJD-OBS"], format="mjd")
-        exptime = header["ESO DET SEQ1 EXPTIME"] << u.s
-        time += 2 * exptime
+        i_obs = int(basename(f).split("_")[1].split(".")[0])
+        time = Time(add["time"][i_obs], format="jd")
 
-        fluxes, waves, uncses = [], [], []
+        wave_data = hdu[1].data
+        flux_data = hdu[2].data
 
-        for i in [1, 2, 3]:
-            chip = f"CHIP{i}.INT1"
-            data = hdu[chip].data
-            for order in range(1, 10):
-                spec_name = f"{order:02}_01_SPEC"
-                wave_name = f"{order:02}_01_WL"
-                uncs_name = f"{order:02}_01_ERR"
-                try:
-                    blaze = flat[chip].data[spec_name]
-                    waves += [data[wave_name]]
-                    fluxes += [data[spec_name] / blaze]
-                    uncses += [data[uncs_name] / blaze]
-                except KeyError:
-                    pass
+        wave = wave_data.ravel()
+        flux = flux_data.ravel()
 
-        nseg = len(fluxes)
-        npoints = len(fluxes[0])
+        nseg, npoints = np.prod(flux_data.shape[:2]), flux_data.shape[-1]
         segments = np.arange(0, (nseg + 1) * npoints, npoints)
 
-        flux = np.concatenate(fluxes)
-        wave = np.concatenate(waves)
-        uncs = np.concatenate(uncses)
         fluxlist += [flux]
         wavelist += [wave]
-        uncslist += [uncs]
         times += [time]
         hdu.close()
 
     fluxlist = np.stack(fluxlist)
     wavelist = np.stack(wavelist)
-    uncslist = np.stack(uncslist)
 
-    # Sort observations in time
     times = Time(times)
     sort = np.argsort(times)
 
     fluxlist = fluxlist[sort]
     wavelist = wavelist[sort]
-    uncslist = uncslist[sort]
     times = times[sort]
-
-    # Sort the segments by wavelength
-    for i in range(len(wavelist)):
-        sort = np.argsort(wavelist[i])
-        wavelist[i] = wavelist[i][sort]
-        fluxlist[i] = fluxlist[i][sort]
-        uncslist[i] = uncslist[i][sort]
 
     os.makedirs(dirname(savefilename), exist_ok=True)
 
@@ -132,19 +109,19 @@ def load_data(data_dir, load=False):
         savefilename,
         flux=fluxlist,
         wave=wavelist,
-        uncs=uncslist,
         time=times,
         segments=segments,
         header=header,
     )
-    return wavelist, fluxlist, uncslist, times, segments, header
+    return wavelist, fluxlist, None, times, segments, header
 
 
 def correct_data(data):
     wave, flux, uncs, times, segments, header = data
 
     # Remove excess flux points
-    flux[np.abs(flux) > 15000] = np.nan
+    # flux[np.abs(flux) > 15000] = np.nan
+    uncs = np.ones_like(flux)
     # Fit uncertainty estimate of the observations
     # https://arxiv.org/pdf/2201.04025.pdf
     # 3 components as determined by elbow plot
@@ -246,7 +223,7 @@ def correct_data(data):
 # define the names of the star and planet
 # as well as the datasets within the datasets folder
 star, planet = "WASP-107", "b"
-datasets = "220310_WASP107"
+datasets = "WASP-107b_SNR100"
 
 # Load the nominal data for this star and planet from simbad/nasa exoplanet archive
 sdb = StellarDb()
@@ -271,48 +248,47 @@ else:
     n1, n2 = 0, 7
 
 # Where to find the data, might need to be adjusted
-data_dir = "/DATA/ESO/CRIRES+/GTO/220310_WASP107/1xAB_??"
+data_dir = join(dirname(__file__), "../datasets", datasets, "Spectrum_00")
 # load the data from the fits files, returns several objects
 data = load_data(data_dir, load=False)
-wave, flux, uncs, times, segments, header = data
-wave *= u.nm.to(u.AA)
-
-# Correct outliers, basic continuum normalization
-data = correct_data(data)
 wave, flux, uncs, times, segments, header = data
 
 # Calculate airmass
 altaz = star.coordinates.transform_to(AltAz(obstime=times, location=telescope))
 airmass = altaz.secz.value
 
+# Correct outliers, basic continuum normalization
+data = correct_data(data)
+wave, flux, uncs, times, segments, header = data
+
 # Determine telluric lines
 # and remove the strongest ones
-fname = join(dirname(__file__), "../psg_trn.txt")
-df = pd.read_table(
-    fname,
-    sep=r"\s+",
-    comment="#",
-    header=None,
-    names=[
-        "wave",
-        "total",
-        "H2O",
-        "CO2",
-        "O3",
-        "N2O",
-        "CO",
-        "CH4",
-        "O2",
-        "N2",
-        "Rayleigh",
-        "CIA",
-    ],
-)
-mwave = df["wave"] * u.nm.to(u.AA)
-mflux = df["total"]
-mflux = np.interp(wave[16], mwave, mflux, left=1, right=1)
-idx = mflux < 0.90
-flux[:, idx] = np.nan
+# fname = join(dirname(__file__), "../psg_trn.txt")
+# df = pd.read_table(
+#     fname,
+#     sep=r"\s+",
+#     comment="#",
+#     header=None,
+#     names=[
+#         "wave",
+#         "total",
+#         "H2O",
+#         "CO2",
+#         "O3",
+#         "N2O",
+#         "CO",
+#         "CH4",
+#         "O2",
+#         "N2",
+#         "Rayleigh",
+#         "CIA",
+#     ],
+# )
+# mwave = df["wave"] * u.nm.to(u.AA)
+# mflux = df["total"]
+# mflux = np.interp(wave[16], mwave, mflux, left=1, right=1)
+# idx = mflux < 0.9
+# flux[:, idx] = np.nan
 
 
 @cache(cache_path=f"/tmp/{star.name}_{planet.name}.npz")
@@ -323,23 +299,11 @@ def ptr_spec(wave, star, planet, rv_range):
     ptr = petitRADTRANS(
         wmin,
         wmax,
-        # The line species is more important than the exact composition of the atmosphere
-        # Earth-like
-        # rayleigh_species=("N2", "O2"),
-        # continuum_species=("N2", "O2"),
-        # line_species=("H2O", "CO2"),
-        # mass_fractions={"N2": 0.78, "O2": 0.2, "Ar": 0.01, "CO2": 4e-4, "H2O": 1e-3},
-        # Jupiter-like
         # line_species=("H2O",),
-        # mass_fractions={"H2": 0.9, "He": 0.1, "H2O": 1e-3},
-        # CO2 lines
-        # line_species=("CO2", ),
-        # mass_fractions={"H2": 0.9, "He": 0.1, "CO2": 1e-3}
-        # CO-CO2 lines
+        # mass_fractions={"H2": 0.74, "He": 0.24, "H2O": 0.02},
         rayleigh_species=(),
         continuum_species=(),
-        # line_species=("CO", "CO2", "H2O"),
-        line_species=("H2O", "CO", "CO2"),
+        line_species=("CO", "CO2", "H2O"),
         mass_fractions={"H2": 0.9, "He": 0.1, "CO": 1e-3, "CO2": 1e-3, "H2O": 1e-3},
     )
     ptr.init_temp_press_profile(star, planet)
@@ -354,6 +318,13 @@ if hasattr(ptr_wave, "unit"):
     ptr_wave = ptr_wave.to_value(u.um)
 ptr_wave *= u.um.to(u.AA)
 
+ptr_fname = join(dirname(__file__), "H2O_transmission_spec-inject.dat")
+ptr_data = pd.read_table(
+    ptr_fname, sep=r"\s+", comment="#", header=None, names=["wave", "flux"]
+)
+p_wave = ptr_data["wave"] * u.cm.to(u.AA)
+p_flux = ptr_data["flux"]
+
 
 @cache(cache_path=f"/tmp/ccfref_{star.name}_{planet.name}.npz")
 def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
@@ -366,15 +337,16 @@ def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
 n = wave.shape[0] // 2
 clear_cache(ptr_ref, (wave[16], ptr_wave, ptr_flux, rv_range, rv_step))
 ref = ptr_ref(wave[n], ptr_wave, ptr_flux, rv_range, rv_step)
-ref -= np.nanmin(ref, axis=1)[:, None]
-ref /= np.nanmax(ref, axis=1)[:, None]
+for low, upp in zip(segments[:-1], segments[1:]):
+    ref[:, low:upp] -= np.nanmin(ref[:, low:upp], axis=1)[:, None]
+    ref[:, low:upp] /= np.nanmax(ref[:, low:upp], axis=1)[:, None]
 
 # Barycentric correction
 rv_bary = -star.coordinates.radial_velocity_correction(
     obstime=times, location=telescope
 )
 rv_bary -= np.mean(rv_bary)
-rv_bary = rv_bary.to_value("km/s")
+rv_bary = -rv_bary.to_value("km/s")
 
 
 # Run SYSREM
@@ -387,16 +359,11 @@ def run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass):
     # n = wave.shape[0] // 2
     for low, upp in zip(segments[:-1], segments[1:]):
         # sysrem = SysremWithProjection(
-        #     wave[n, low:upp], flux[:, low:upp], rv_bary, airmass, uncs
+        #     wave[n, low:upp], flux[:, low:upp], rv_bary, airmass, None
         # )
         # corrected_flux[:, low:upp], *_ = sysrem.run(n1)
-        # sysrem = Sysrem(corrected_flux[:, low:upp])
-        # corrected_flux[:, low:upp], *_ = sysrem.run(n2)
         sysrem = Sysrem(flux[:, low:upp], errors=uncs[:, low:upp])
         corrected_flux[:, low:upp], *_ = sysrem.run(n2)
-        # resid, model = sysrem.run(n2)
-        # model = model[0] + np.nansum(model[1:], axis=0)
-        # corrected_flux[:, low:upp] = flux[:, low:upp] / model
     return corrected_flux
 
 
@@ -425,16 +392,18 @@ cc_data, rv_array = run_cross_correlation_ptr(
     cache_suffix=cache_suffix,
 )
 
-# Normalize the cross correlation of each segment
 for i in range(len(cc_data)):
     cc_data[i] -= np.nanmean(cc_data[i], axis=1)[:, None]
     cc_data[i] /= np.nanstd(cc_data[i], axis=1)[:, None]
+
+# Normalize the cross correlation of each segment
+# cc_data -= np.nanmean(cc_data, axis=(1, 2))[:, None, None]
+# cc_data /= np.nanstd(cc_data, axis=(1, 2))[:, None, None]
 
 combined = np.nansum(cc_data, axis=0)
 cohen_d = calculate_cohen_d_for_dataset(
     combined, times, star, planet, rv_range, rv_step
 )
-
 
 # Plot the cross correlation
 rv_points = int(2 * rv_range / rv_step + 1)
@@ -446,68 +415,53 @@ kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
 vp = vsys + kp * np.sin(2 * np.pi * phi)
 vp_idx = np.interp(vp, rv_array, np.arange(rv_points))
 
-plt.clf()
-plot_fname = f"plots/ccresult_{star.name}_{planet.name}_{n1}_{n2}.png"
-os.makedirs(dirname(plot_fname), exist_ok=True)
+plot_fname = f"ccresult_{star.name}_{planet.name}_{n1}_{n2}.png"
 for i in range(cc_data.shape[0]):
     plt.subplot(6, 3, i + 1)
-    plt.imshow(cc_data[i], aspect="auto", origin="lower")
+    vmin, vmax = np.nanpercentile(cc_data[i], (0, 100))
+    plt.imshow(cc_data[i], aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
     # plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
 plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}")
 plt.savefig(plot_fname)
-# plt.show()
-
-plt.clf()
-plot_fname = f"plots/ccresult_{star.name}_{planet.name}_{n1}_{n2}_line.png"
-os.makedirs(dirname(plot_fname), exist_ok=True)
-for i in range(cc_data.shape[0]):
-    plt.subplot(6, 3, i + 1)
-    plt.imshow(cc_data[i], aspect="auto", origin="lower")
-    plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}")
-plt.savefig(plot_fname)
-# plt.show()
-
-for i in range(cc_data.shape[0]):
-    plt.clf()
-    plot_fname = (
-        f"plots/{n1}_{n2}/ccresult_{star.name}_{planet.name}_{n1}_{n2}_segment_{i}.png"
-    )
-    os.makedirs(dirname(plot_fname), exist_ok=True)
-    plt.imshow(cc_data[i], aspect="auto", origin="lower")
-    # plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-    plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}\nSegment{i}")
-    plt.savefig(plot_fname)
-
-for i in range(cc_data.shape[0]):
-    plt.clf()
-    plot_fname = f"plots/{n1}_{n2}/ccresult_{star.name}_{planet.name}_{n1}_{n2}_segment_{i}_line.png"
-    os.makedirs(dirname(plot_fname), exist_ok=True)
-    plt.imshow(cc_data[i], aspect="auto", origin="lower")
-    plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-    plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}\nSegment{i}")
-    plt.savefig(plot_fname)
-
-pass
+plt.show()
 
 combined = np.nansum(cc_data, axis=0)
-plt.clf()
-plt.imshow(combined, aspect="auto", origin="lower")
-# plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}\nCombined")
-plot_fname = (
-    f"plots/{n1}_{n2}/ccresult_{star.name}_{planet.name}_{n1}_{n2}_combined.png"
-)
-plt.savefig(plot_fname)
-plt.show()
-
-plt.clf()
 plt.imshow(combined, aspect="auto", origin="lower")
 plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}\nCombined")
-plot_fname = (
-    f"plots/{n1}_{n2}/ccresult_{star.name}_{planet.name}_{n1}_{n2}_combined_line.png"
-)
-plt.savefig(plot_fname)
 plt.show()
-pass
+
+# Plot the results
+rv_points = int(2 * rv_range / rv_step + 1)
+phi = (times - planet.time_of_transit) / planet.period
+phi = phi.to_value(1)
+phi = phi % 1
+vsys = star.radial_velocity.to_value("km/s")
+kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
+vp = vsys - kp * np.sin(2 * np.pi * phi)
+vp_idx = np.interp(vp, rv_array, np.arange(rv_points))
+
+plt.imshow(np.nansum(cc_data, axis=0), aspect="auto")
+plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
+plt.show()
+
+# pass
+# # Coadd all the ccfs together
+# rv = orbit.radial_velocity_planet(times)
+# cc_data_coadd, cc_it, cc_oot = coadd_cross_correlation(
+#     cc_data, rv, rv_array, times, planet, data_dir=data_dir, load=True
+# )
+
+# # Fit a gaussian
+# p0 = [np.max(cc_data_coadd) - np.min(cc_data_coadd), 0, 10, np.min(cc_data_coadd)]
+# gauss, pval = gaussfit(rv_array, cc_data_coadd, p0=p0)
+
+# # Plot the results
+# plt.plot(rv_array, cc_data_coadd, label="all observations")
+# plt.plot(rv_array, gauss, label="best fit gaussian")
+# plt.plot(rv_array, cc_it, label="in-transit")
+# plt.plot(rv_array, cc_oot, label="out-of-transit")
+# plt.legend()
+# plt.title(f"{star.name} {planet.name}")
+# plt.xlabel(r"$\Delta$RV [km/s]")
+# plt.ylabel("CCF")
+# plt.show()
