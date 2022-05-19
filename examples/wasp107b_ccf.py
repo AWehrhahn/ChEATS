@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
-import re
 import sys
 from glob import glob
 from os.path import basename, dirname, exists, join, realpath
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
@@ -14,7 +12,6 @@ from astropy.io import fits
 from astropy.time import Time
 from cache_decorator import Cache as cache
 from exoorbit.orbit import Orbit
-from molecfit_wrapper.molecfit import Molecfit
 from scipy.constants import speed_of_light
 from scipy.ndimage import gaussian_filter1d, median_filter
 from scipy.optimize import minimize
@@ -22,15 +19,17 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 from exoplanet_transit_snr.petitradtrans import petitRADTRANS
+from exoplanet_transit_snr.plot import plot_results
 from exoplanet_transit_snr.snr_estimate import (
     calculate_cohen_d_for_dataset,
     cross_correlation_reference,
     run_cross_correlation_ptr,
 )
 from exoplanet_transit_snr.stellardb import StellarDb
-from exoplanet_transit_snr.sysrem import Sysrem, SysremWithProjection
+from exoplanet_transit_snr.sysrem import Sysrem
 
 c_light = speed_of_light * 1e-3
+rp = realpath(join(dirname(__file__), ".."))
 
 
 def clear_cache(func, args=None, kwargs=None):
@@ -220,6 +219,8 @@ def correct_data(data):
     return data
 
 
+# Setup the parameters for the star and planet
+# --------------------------------------------
 # define the names of the star and planet
 # as well as the datasets within the datasets folder
 star, planet = "WASP-107", "b"
@@ -247,51 +248,62 @@ if len(sys.argv) > 1:
 else:
     n1, n2 = 0, 7
 
+# Load the observation data, and correct it
+# ------------------------------------------
 # Where to find the data, might need to be adjusted
 data_dir = join(dirname(__file__), "../datasets", datasets, "Spectrum_00")
 # load the data from the fits files, returns several objects
 data = load_data(data_dir, load=False)
+# Correct outliers, basic continuum normalization
+data = correct_data(data)
 wave, flux, uncs, times, segments, header = data
 
 # Calculate airmass
 altaz = star.coordinates.transform_to(AltAz(obstime=times, location=telescope))
 airmass = altaz.secz.value
 
-# Correct outliers, basic continuum normalization
-data = correct_data(data)
-wave, flux, uncs, times, segments, header = data
+# Barycentric correction
+rv_bary = -star.coordinates.radial_velocity_correction(
+    obstime=times, location=telescope
+)
+rv_bary -= np.mean(rv_bary)
+rv_bary = -rv_bary.to_value("km/s")
+
 
 # Determine telluric lines
 # and remove the strongest ones
-# fname = join(dirname(__file__), "../psg_trn.txt")
-# df = pd.read_table(
-#     fname,
-#     sep=r"\s+",
-#     comment="#",
-#     header=None,
-#     names=[
-#         "wave",
-#         "total",
-#         "H2O",
-#         "CO2",
-#         "O3",
-#         "N2O",
-#         "CO",
-#         "CH4",
-#         "O2",
-#         "N2",
-#         "Rayleigh",
-#         "CIA",
-#     ],
-# )
-# mwave = df["wave"] * u.nm.to(u.AA)
-# mflux = df["total"]
-# mflux = np.interp(wave[16], mwave, mflux, left=1, right=1)
-# idx = mflux < 0.9
-# flux[:, idx] = np.nan
+fname = join(dirname(__file__), "../psg_trn.txt")
+df = pd.read_table(
+    fname,
+    sep=r"\s+",
+    comment="#",
+    header=None,
+    names=[
+        "wave",
+        "total",
+        "H2O",
+        "CO2",
+        "O3",
+        "N2O",
+        "CO",
+        "CH4",
+        "O2",
+        "N2",
+        "Rayleigh",
+        "CIA",
+    ],
+)
+mwave = df["wave"] * u.nm.to(u.AA)
+mflux = df["total"]
+mflux = np.interp(wave[wave.shape[0] // 2], mwave, mflux, left=1, right=1)
+idx = mflux < 0.9
+flux[:, idx] = np.nan
+
+# Get the expected planet spectrum reference spectrum from petitRADTRANS
+# ----------------------------------------------------------------------
 
 
-@cache(cache_path=f"/tmp/{star.name}_{planet.name}.npz")
+@cache(cache_path=f"{rp}/{star.name}_{planet.name}_petitRADTRANS.npz")
 def ptr_spec(wave, star, planet, rv_range):
     wmin, wmax = wave.min() << u.AA, wave.max() << u.AA
     wmin *= 1 - rv_range / c_light
@@ -311,19 +323,13 @@ def ptr_spec(wave, star, planet, rv_range):
     return ptr_wave, ptr_flux
 
 
-clear_cache(ptr_spec, (wave, star, planet, rv_range))
+# Don't clear the cache unless you have petitRadtrans installed and working
+# clear_cache(ptr_spec, (wave, star, planet, rv_range))
 ptr_wave, ptr_flux = ptr_spec(wave, star, planet, rv_range)
 if hasattr(ptr_wave, "unit"):
     # ptr_wave gets saved without the quantity information by the cache
     ptr_wave = ptr_wave.to_value(u.um)
 ptr_wave *= u.um.to(u.AA)
-
-ptr_fname = join(dirname(__file__), "H2O_transmission_spec-inject.dat")
-ptr_data = pd.read_table(
-    ptr_fname, sep=r"\s+", comment="#", header=None, names=["wave", "flux"]
-)
-p_wave = ptr_data["wave"] * u.cm.to(u.AA)
-p_flux = ptr_data["flux"]
 
 
 @cache(cache_path=f"/tmp/ccfref_{star.name}_{planet.name}.npz")
@@ -335,25 +341,18 @@ def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
 
 
 n = wave.shape[0] // 2
-clear_cache(ptr_ref, (wave[16], ptr_wave, ptr_flux, rv_range, rv_step))
+clear_cache(ptr_ref, (wave[n], ptr_wave, ptr_flux, rv_range, rv_step))
 ref = ptr_ref(wave[n], ptr_wave, ptr_flux, rv_range, rv_step)
+# Normalize each segment of the cc reference
 for low, upp in zip(segments[:-1], segments[1:]):
     ref[:, low:upp] -= np.nanmin(ref[:, low:upp], axis=1)[:, None]
     ref[:, low:upp] /= np.nanmax(ref[:, low:upp], axis=1)[:, None]
 
-# Barycentric correction
-rv_bary = -star.coordinates.radial_velocity_correction(
-    obstime=times, location=telescope
-)
-rv_bary -= np.mean(rv_bary)
-rv_bary = -rv_bary.to_value("km/s")
+# Run SYSREM on the observations
+# ------------------------------
 
 
-# Run SYSREM
-rp = realpath(join(dirname(__file__), ".."))
-
-
-@cache(cache_path=f"{rp}/sysrem_{{n1}}_{{n2}}_{star.name}_{planet.name}.npz")
+@cache(cache_path=f"{rp}/{star.name}_{planet.name}_sysrem_{{n1}}_{{n2}}.npz")
 def run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass):
     corrected_flux = np.zeros_like(flux)
     # n = wave.shape[0] // 2
@@ -367,7 +366,6 @@ def run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass):
     return corrected_flux
 
 
-# Run Sysrem
 # the first number is the number of sysrem iterations accounting for the barycentric velocity
 # the second is for regular sysrem iterations
 clear_cache(run_sysrem, (flux, uncs, segments, n1, n2, rv_bary, airmass))
@@ -380,6 +378,7 @@ std[std == 0] = 1
 corrected_flux /= std
 
 # Run the cross correlation between the sysrem residuals and the expected planet spectrum
+# ---------------------------------------------------------------------------------------
 cache_suffix = f"_{n1}_{n2}_{star.name}_{planet.name}".lower().replace(" ", "_")
 cc_data, rv_array = run_cross_correlation_ptr(
     corrected_flux,
@@ -392,76 +391,22 @@ cc_data, rv_array = run_cross_correlation_ptr(
     cache_suffix=cache_suffix,
 )
 
+# Normalize the cross correlation of each segment
 for i in range(len(cc_data)):
     cc_data[i] -= np.nanmean(cc_data[i], axis=1)[:, None]
     cc_data[i] /= np.nanstd(cc_data[i], axis=1)[:, None]
 
-# Normalize the cross correlation of each segment
-# cc_data -= np.nanmean(cc_data, axis=(1, 2))[:, None, None]
-# cc_data /= np.nanstd(cc_data, axis=(1, 2))[:, None, None]
-
+# Combine all data, and determine the cohen d value
+# -------------------------------------------------
 combined = np.nansum(cc_data, axis=0)
-cohen_d = calculate_cohen_d_for_dataset(
-    combined, times, star, planet, rv_range, rv_step
-)
+res = calculate_cohen_d_for_dataset(combined, times, star, planet, rv_range, rv_step)
 
-# Plot the cross correlation
-rv_points = int(2 * rv_range / rv_step + 1)
-phi = (times - planet.time_of_transit) / planet.period
-phi = phi.to_value(1)
-phi = phi % 1
-vsys = star.radial_velocity.to_value("km/s")
-kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
-vp = vsys + kp * np.sin(2 * np.pi * phi)
-vp_idx = np.interp(vp, rv_array, np.arange(rv_points))
+# Plot the cross correlation results
+# ----------------------------------
+# by default the plots will be saved to disk and actively displayed
+# set show to False if you do not want to see all the plots
+title = f"{star.name}_{planet.name}_{n1}_{n2}"
+folder = f"{rp}/plots/{star.name}_{planet.name}_{n1}_{n2}"
+plot_results(rv_array, cc_data, combined, res, title, folder, show=True)
 
-plot_fname = f"ccresult_{star.name}_{planet.name}_{n1}_{n2}.png"
-for i in range(cc_data.shape[0]):
-    plt.subplot(6, 3, i + 1)
-    vmin, vmax = np.nanpercentile(cc_data[i], (0, 100))
-    plt.imshow(cc_data[i], aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
-    # plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.suptitle(f"{star.name} {planet.name} SYSREM {n1}_{n2}")
-plt.savefig(plot_fname)
-plt.show()
-
-combined = np.nansum(cc_data, axis=0)
-plt.imshow(combined, aspect="auto", origin="lower")
-plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.show()
-
-# Plot the results
-rv_points = int(2 * rv_range / rv_step + 1)
-phi = (times - planet.time_of_transit) / planet.period
-phi = phi.to_value(1)
-phi = phi % 1
-vsys = star.radial_velocity.to_value("km/s")
-kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
-vp = vsys - kp * np.sin(2 * np.pi * phi)
-vp_idx = np.interp(vp, rv_array, np.arange(rv_points))
-
-plt.imshow(np.nansum(cc_data, axis=0), aspect="auto")
-plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
-plt.show()
-
-# pass
-# # Coadd all the ccfs together
-# rv = orbit.radial_velocity_planet(times)
-# cc_data_coadd, cc_it, cc_oot = coadd_cross_correlation(
-#     cc_data, rv, rv_array, times, planet, data_dir=data_dir, load=True
-# )
-
-# # Fit a gaussian
-# p0 = [np.max(cc_data_coadd) - np.min(cc_data_coadd), 0, 10, np.min(cc_data_coadd)]
-# gauss, pval = gaussfit(rv_array, cc_data_coadd, p0=p0)
-
-# # Plot the results
-# plt.plot(rv_array, cc_data_coadd, label="all observations")
-# plt.plot(rv_array, gauss, label="best fit gaussian")
-# plt.plot(rv_array, cc_it, label="in-transit")
-# plt.plot(rv_array, cc_oot, label="out-of-transit")
-# plt.legend()
-# plt.title(f"{star.name} {planet.name}")
-# plt.xlabel(r"$\Delta$RV [km/s]")
-# plt.ylabel("CCF")
-# plt.show()
+pass
