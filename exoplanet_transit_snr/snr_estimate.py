@@ -312,8 +312,8 @@ def calculate_cohen_d_for_dataset(
     planet,
     rv_range=100,
     rv_step=1,
-    plot=True,
-    title="",
+    vsys_range=(-20, 20),
+    kp_range=(-150, 150),
 ):
     phi = (datetime - planet.time_of_transit) / planet.period
     phi = phi.to_value(1)
@@ -330,49 +330,20 @@ def calculate_cohen_d_for_dataset(
 
     rv_points = int(2 * rv_range / rv_step + 1)
     rv = np.linspace(-rv_range, rv_range, rv_points)
-    # vp_idx = np.interp(vp, rv, np.arange(rv.size))
 
-    if plot:
-        vmin, vmax = np.nanpercentile(data.ravel(), [5, 95])
-        plt.imshow(data, aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
-        plt.xlabel("rv [km/s]")
-        plt.ylabel("#Obs")
-        xticks = plt.xticks()[0][1:-1]
-        rv_ticks = np.linspace(xticks[0], xticks[-1], len(rv))
-        xticks_labels = np.interp(xticks, rv_ticks, rv)
-        xticks_labels = [f"{x:.3g}" for x in xticks_labels]
-        plt.xticks(xticks, labels=xticks_labels)
-        # plt.plot(vp_idx, np.arange(data.shape[0]), "r-.", alpha=0.5)
-        plt.hlines(
-            np.arange(data.shape[0])[in_transit][0],
-            -0.5,
-            data.shape[1] + 0.5,
-            "k",
-            "--",
-        )
-        plt.hlines(
-            np.arange(data.shape[0])[in_transit][-1],
-            -0.5,
-            data.shape[1] + 0.5,
-            "k",
-            "--",
-        )
-        plt.xlim(-0.5, data.shape[1] + 0.5)
-        plt.title(title)
-        plt.show()
+    vsys_min, vsys_max = int(vsys + vsys_range[0]), int(vsys + vsys_range[1])
+    kp_min, kp_max = int(kp + kp_range[0]), int(kp + kp_range[1])
 
-    vsys_min, vsys_max = int(vsys) - 20, int(vsys) + 20
-    kp_min, kp_max = int(kp) - 150, int(kp) + 150
     vsys = np.linspace(vsys_min, vsys_max, int((vsys_max - vsys_min + 1) // rv_step))
     kp = np.linspace(kp_min, kp_max, int((kp_max - kp_min + 1) // rv_step))
     combined = np.zeros((len(kp), len(vsys)))
     interpolator = interp1d(rv, data, kind="linear", bounds_error=False)
     for i, vs in enumerate(tqdm(vsys)):
         for j, k in enumerate(tqdm(kp, leave=False)):
-            vp = vs + k * np.sin(2 * np.pi * phi)
+            vp_loc = vs + k * np.sin(2 * np.pi * phi)
             # shifted = [np.interp(vp[i], rv, data[i], left=np.nan, right=np.nan) for i in range(len(vp))]
-            shifted = np.diag(interpolator(vp))
-            combined[j, i] = np.nansum(shifted[in_transit])
+            shifted = np.diag(interpolator(vp_loc))
+            combined[j, i] = np.nansum(shifted)
 
     # Normalize to the number of input spectra
     combined /= data.shape[0]
@@ -395,7 +366,7 @@ def calculate_cohen_d_for_dataset(
 
         # And then fit gaussians to determine the width
         try:
-            curve, vsys_popt = gaussfit(
+            _, vsys_popt = gaussfit(
                 vsys,
                 mean_vsys,
                 p0=[
@@ -419,7 +390,7 @@ def calculate_cohen_d_for_dataset(
         kp_peak = np.argmax(mean_kp)
 
         try:
-            curve, kp_popt = gaussfit(
+            _, kp_popt = gaussfit(
                 kp,
                 mean_kp,
                 p0=[
@@ -435,110 +406,12 @@ def calculate_cohen_d_for_dataset(
             kp_popt = None
             break
 
-    # vsys_width = int(np.ceil(vsys_width))
-    # kp_width = int(np.ceil(kp_width))
-    vsys_width = int(2 / rv_step)  # +-2 km/s
-    kp_width = int(20 / rv_step)  # +-10 km/s
-
-    if plot:
-        # vsys_peak_low = vsys[max(vsys_peak - vsys_width, 0)]
-        # vsys_peak_upp = vsys[min(vsys_peak + vsys_width, len(vsys) - 1)]
-        # kp_peak_low = kp[max(kp_peak - kp_width, 0)]
-        # kp_peak_upp = kp[min(kp_peak + kp_width, len(kp) - 1)]
-
-        vp_new = vsys[vsys_peak] + kp[kp_peak] * np.sin(2 * np.pi * phi)
-        # vp_low_low = vsys_peak_low + kp_peak_low * np.sin(2 * np.pi * phi)
-        # vp_low_upp = vsys_peak_low + kp_peak_upp * np.sin(2 * np.pi * phi)
-        # vp_upp_low = vsys_peak_upp + kp_peak_low * np.sin(2 * np.pi * phi)
-        # vp_upp_upp = vsys_peak_upp + kp_peak_upp * np.sin(2 * np.pi * phi)
-        # vp_low = np.min([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
-        # vp_upp = np.max([vp_low_low, vp_low_upp, vp_upp_low, vp_upp_upp], axis=0)
-
-        vp_idx_new = np.interp(vp_new, rv, np.arange(rv.size))
-        # vp_idx_low = np.interp(vp_low, rv, np.arange(rv.size))
-        # vp_idx_upp = np.interp(vp_upp, rv, np.arange(rv.size))
-        vmin, vmax = np.nanpercentile(data.ravel(), [5, 95])
-
-        plt.imshow(data, aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
-        plt.xlabel("rv [km/s]")
-        xticks = plt.xticks()[0][1:-1]
-        rv_ticks = np.linspace(xticks[0], xticks[-1], len(rv))
-        xticks_labels = np.interp(xticks, rv_ticks, rv)
-        xticks_labels = [f"{x:.3g}" for x in xticks_labels]
-        plt.xticks(xticks, labels=xticks_labels)
-        # plt.plot(vp_idx, np.arange(data.shape[0]), "r-.")
-        plt.plot(vp_idx_new, np.arange(data.shape[0]), "k-.")
-        plt.hlines(
-            np.arange(data.shape[0])[in_transit][0],
-            -0.5,
-            data.shape[1] + 0.5,
-            "k",
-            "--",
-        )
-        plt.hlines(
-            np.arange(data.shape[0])[in_transit][-1],
-            -0.5,
-            data.shape[1] + 0.5,
-            "k",
-            "--",
-        )
-        # plt.fill_betweenx(
-        #     np.arange(data.shape[0]),
-        #     vp_idx_low,
-        #     vp_idx_upp,
-        #     color="tab:orange",
-        #     alpha=0.5,
-        # )
-        plt.xlim(-0.5, data.shape[1] + 0.5)
-        plt.title(title)
-        plt.show()
-
-        # Plot the results
-        ax = plt.subplot(121)
-        plt.imshow(combined, aspect="auto", origin="lower")
-        ax.add_patch(
-            plt.Rectangle(
-                (vsys_peak - vsys_width, kp_peak - kp_width),
-                2 * vsys_width,
-                2 * kp_width,
-                fill=False,
-                color="red",
-            )
-        )
-
-        plt.xlabel("vsys [km/s]")
-        xticks = plt.xticks()[0][1:-1]
-        rv_ticks = np.linspace(xticks[0], xticks[-1], len(vsys))
-        xticks_labels = np.interp(xticks, rv_ticks, vsys)
-        xticks_labels = [f"{x:.3g}" for x in xticks_labels]
-        plt.xticks(xticks, labels=xticks_labels)
-
-        plt.ylabel("Kp [km/s]")
-        yticks = plt.yticks()[0][1:-1]
-        yticks_labels = np.interp(yticks, np.arange(len(kp)), kp)
-        yticks_labels = [f"{y:.3g}" for y in yticks_labels]
-        plt.yticks(yticks, labels=yticks_labels)
-
-        plt.subplot(222)
-        if vsys_popt is not None:
-            plt.plot(vsys, gauss(vsys, *vsys_popt), "r--")
-        plt.plot(vsys, mean_vsys)
-        plt.vlines(vsys[vsys_peak], np.min(mean_vsys), mean_vsys[vsys_peak], "k", "--")
-        plt.xlabel("vsys [km/s]")
-
-        plt.subplot(224)
-        plt.plot(kp, mean_kp)
-        plt.vlines(kp[kp_peak], np.min(mean_kp), mean_kp[kp_peak], "k", "--")
-        if kp_popt is not None:
-            plt.plot(kp, gauss(kp, *kp_popt), "r--")
-        plt.xlabel("Kp [km/s]")
-
-        plt.suptitle(title)
-        plt.show()
+    vsys_width = int(np.ceil(vsys_width))
+    kp_width = int(np.ceil(kp_width))
 
     # Have to check that this makes sense
-    vsys_width = int(2 / rv_step)  # +-2 km/s
-    kp_width = int(20 / rv_step)  # +-10 km/s
+    # vsys_width = int(2 / rv_step)  # +-2 km/s
+    # kp_width = int(20 / rv_step)  # +-10 km/s
 
     mask = np.full(combined.shape, False)
     kp_low = max(0, kp_peak - kp_width)
@@ -554,29 +427,34 @@ def calculate_cohen_d_for_dataset(
     bins = 100
     _, hbins = np.histogram(in_trail, bins=bins, range=hrange, density=True)
 
-    # What does this mean?
+    # Calculate the cohen d between the 2 distributions
     d = cohen_d(in_trail, out_trail)
 
-    if plot:
-        plt.hist(
-            in_trail.ravel(),
-            bins=hbins,
-            density=True,
-            histtype="step",
-            label="in-trail",
-        )
-        plt.hist(
-            out_trail.ravel(),
-            bins=hbins,
-            density=True,
-            histtype="step",
-            label="out-of-trail",
-        )
-        plt.legend()
-        plt.title(f"{title}\nCohen d: {d}")
-        plt.show()
+    res = {
+        "d": d,
+        "combined": combined,
+        "vsys": vsys,
+        "vsys_peak": vsys_peak,
+        "vsys_width": vsys_width,
+        "vsys_popt": vsys_popt,
+        "vsys_mean": mean_vsys,
+        "kp": kp,
+        "kp_peak": kp_peak,
+        "kp_width": kp_width,
+        "kp_popt": kp_popt,
+        "kp_mean": mean_kp,
+        "in_trail": in_trail,
+        "out_of_trail": out_trail,
+        "bins": hbins,
+        "phi": phi,
+        "in_transit": in_transit,
+        "ingress": ingress,
+        "egress": egress,
+        "rv_points": rv_points,
+        "vp": vp,
+    }
 
-    return d
+    return res
 
 
 def load_data(data_dir, load=False):

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import os
 import sys
 from glob import glob
@@ -445,8 +446,16 @@ res = calculate_cohen_d_for_dataset(
     vsys_range=(-30, 20),
 )
 
+# Save the cohen d value
+# fname = f"{rp}/results/cohen_d_{star.name}_{planet.name}_{n1}_{n2}.json"
+# cohend = {"cohen_d": res["d"], "sysrem_n": n2, "myrem_n": n1}
+# os.makedirs(dirname(fname), exist_ok=True)
+# with open(fname, "w") as f:
+#     json.dump(cohend, f)
+
 # Plot all the results
 title = f"{star.name}_{planet.name}_{n1}_{n2}"
-folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}"
+folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}_real"
+
 plot_results(rv_array, cc_data, combined, res, title=title, folder=folder)
 pass

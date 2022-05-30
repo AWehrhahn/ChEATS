@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import os
 import sys
 from glob import glob
@@ -401,12 +402,20 @@ for i in range(len(cc_data)):
 combined = np.nansum(cc_data, axis=0)
 res = calculate_cohen_d_for_dataset(combined, times, star, planet, rv_range, rv_step)
 
+
+# Save the cohen d value
+fname = f"{rp}/results/cohen_d_{star.name}_{planet.name}_{n1}_{n2}.json"
+cohend = {"cohen_d": res["d"], "sysrem_n": n2, "myrem_n": n1}
+os.makedirs(dirname(fname), exist_ok=True)
+with open(fname, "w") as f:
+    json.dump(cohend, f)
+
 # Plot the cross correlation results
 # ----------------------------------
 # by default the plots will be saved to disk and actively displayed
 # set show to False if you do not want to see all the plots
 title = f"{star.name}_{planet.name}_{n1}_{n2}"
-folder = f"{rp}/plots/{star.name}_{planet.name}_{n1}_{n2}"
+folder = f"{rp}/plots/{star.name}_{planet.name}_{n1}_{n2}_ccf"
 plot_results(rv_array, cc_data, combined, res, title, folder, show=True)
 
 pass
