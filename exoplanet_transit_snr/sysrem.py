@@ -10,13 +10,14 @@ from pickle import NONE
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pyximport
+
+# import pyximport
 from scipy import constants
 from scipy.interpolate import interp1d, splev, splrep
 from tqdm import tqdm
 
-pyximport.install(language_level=3)
-from . import _sysrem
+# pyximport.install(language_level=3)
+# from . import _sysrem
 
 c_light = constants.c / 1e3
 
