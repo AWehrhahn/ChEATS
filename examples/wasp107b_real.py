@@ -148,7 +148,7 @@ def correct_data(data):
     # https://arxiv.org/pdf/2201.04025.pdf
     # 3 components as determined by elbow plot
     # as they contribute most of the variance
-    pca = PCA(3)
+    pca = PCA(3, svd_solver="full")
     for low, upp in zip(segments[:-1], segments[1:]):
         while True:
             # Use PCA model of the observations
