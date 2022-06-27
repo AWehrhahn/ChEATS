@@ -294,7 +294,6 @@ def run_cross_correlation_ptr(
                 v = reference[j, low:upp]
 
                 corr[k, i, j] += np.nansum(a * v)
-                corr[k, i, j] *= corr[k, i, j].size / np.count_nonzero(corr[k, i, j])
 
                 # a = (a - np.nanmean(a)) / np.nanstd(a)
                 # v = (v - np.nanmean(v)) / np.nanstd(v)
@@ -314,6 +313,7 @@ def calculate_cohen_d_for_dataset(
     rv_step=1,
     vsys_range=(-20, 20),
     kp_range=(-150, 150),
+    fix_kp_vsys=False,
 ):
     phi = (datetime - planet.time_of_transit) / planet.period
     phi = phi.to_value(1)
@@ -323,6 +323,9 @@ def calculate_cohen_d_for_dataset(
     vsys = star.radial_velocity.to_value("km/s")
     kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
     vp = vsys + kp * np.sin(2 * np.pi * phi)
+
+    kp_expected = kp
+    vsys_expected = vsys
 
     ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
     egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
@@ -353,61 +356,77 @@ def calculate_cohen_d_for_dataset(
     median = np.nanmedian(combined)
     combined -= median
 
-    kp_peak = combined.shape[0] // 2
-    kp_width = kp_peak
-
-    for i in range(3):
-        # Determine the peak position in vsys and kp
-        kp_width_int = int(np.ceil(kp_width))
-        lower = max(kp_peak - kp_width_int, 0)
-        upper = min(kp_peak + kp_width_int + 1, combined.shape[0])
-        mean_vsys = np.nanmean(combined[lower:upper, :], axis=0)
-        vsys_peak = np.argmax(mean_vsys)
-
-        # And then fit gaussians to determine the width
-        try:
-            _, vsys_popt = gaussfit(
-                vsys,
-                mean_vsys,
-                p0=[
-                    mean_vsys[vsys_peak] - np.min(mean_vsys),
-                    vsys[vsys_peak],
-                    1,
-                    np.min(mean_vsys),
-                ],
-            )
-            vsys_width = vsys_popt[2] / rv_step
-        except RuntimeError:
-            vsys_width = 10
-            vsys_popt = None
-            break
-
-        # Do the same for the planet velocity
+    # Find peak
+    if fix_kp_vsys:
+        kp_peak = np.digitize(kp_expected, kp)
+        vsys_peak = np.digitize(vsys_expected, vsys)
+        vsys_width = int(3 / rv_step)  # +-3 km/s
+        kp_width = int(40 / rv_step)  # +-10 km/s
+        kp_popt = vsys_popt = None
         vsys_width_int = int(np.ceil(vsys_width)) // 4
         lower = max(vsys_peak - vsys_width_int, 0)
         upper = min(vsys_peak + vsys_width_int + 1, combined.shape[1])
         mean_kp = np.nanmean(combined[:, lower:upper], axis=1)
-        kp_peak = np.argmax(mean_kp)
+        kp_width_int = int(np.ceil(kp_width))
+        lower = max(kp_peak - kp_width_int, 0)
+        upper = min(kp_peak + kp_width_int + 1, combined.shape[0])
+        mean_vsys = np.nanmean(combined[lower:upper, :], axis=0)
+    else:
+        kp_peak = combined.shape[0] // 2
+        kp_width = kp_peak
 
-        try:
-            _, kp_popt = gaussfit(
-                kp,
-                mean_kp,
-                p0=[
-                    mean_kp[kp_peak] - np.min(mean_kp),
-                    kp[kp_peak],
-                    1,
-                    np.min(mean_kp),
-                ],
-            )
-            kp_width = kp_popt[2] / rv_step
-        except RuntimeError:
-            kp_width = 50
-            kp_popt = None
-            break
+        for i in range(3):
+            # Determine the peak position in vsys and kp
+            kp_width_int = int(np.ceil(kp_width))
+            lower = max(kp_peak - kp_width_int, 0)
+            upper = min(kp_peak + kp_width_int + 1, combined.shape[0])
+            mean_vsys = np.nanmean(combined[lower:upper, :], axis=0)
+            vsys_peak = np.argmax(mean_vsys)
 
-    vsys_width = int(np.ceil(vsys_width))
-    kp_width = int(np.ceil(kp_width))
+            # And then fit gaussians to determine the width
+            try:
+                _, vsys_popt = gaussfit(
+                    vsys,
+                    mean_vsys,
+                    p0=[
+                        mean_vsys[vsys_peak] - np.min(mean_vsys),
+                        vsys[vsys_peak],
+                        1,
+                        np.min(mean_vsys),
+                    ],
+                )
+                vsys_width = vsys_popt[2] / rv_step
+            except RuntimeError:
+                vsys_width = 10
+                vsys_popt = None
+                break
+
+            # Do the same for the planet velocity
+            vsys_width_int = int(np.ceil(vsys_width)) // 4
+            lower = max(vsys_peak - vsys_width_int, 0)
+            upper = min(vsys_peak + vsys_width_int + 1, combined.shape[1])
+            mean_kp = np.nanmean(combined[:, lower:upper], axis=1)
+            kp_peak = np.argmax(mean_kp)
+
+            try:
+                _, kp_popt = gaussfit(
+                    kp,
+                    mean_kp,
+                    p0=[
+                        mean_kp[kp_peak] - np.min(mean_kp),
+                        kp[kp_peak],
+                        1,
+                        np.min(mean_kp),
+                    ],
+                )
+                kp_width = kp_popt[2] / rv_step
+            except RuntimeError:
+                kp_width = 50
+                kp_popt = None
+                break
+
+        vsys_width = int(np.ceil(vsys_width))
+        kp_width = int(np.ceil(kp_width))
 
     # Have to check that this makes sense
     # vsys_width = int(2 / rv_step)  # +-2 km/s
@@ -438,11 +457,13 @@ def calculate_cohen_d_for_dataset(
         "vsys_width": vsys_width,
         "vsys_popt": vsys_popt,
         "vsys_mean": mean_vsys,
+        "vsys_expected": vsys_expected,
         "kp": kp,
         "kp_peak": kp_peak,
         "kp_width": kp_width,
         "kp_popt": kp_popt,
         "kp_mean": mean_kp,
+        "kp_expected": kp_expected,
         "in_trail": in_trail,
         "out_of_trail": out_trail,
         "bins": hbins,

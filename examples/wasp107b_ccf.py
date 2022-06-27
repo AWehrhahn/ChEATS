@@ -241,7 +241,7 @@ telescope = EarthLocation.of_site("Paranal")
 # Define the +- range of the radial velocity points,
 # and the density of the sampling
 rv_range = 200
-rv_step = 1
+rv_step = 0.25
 
 if len(sys.argv) > 1:
     n1 = int(sys.argv[1])
@@ -399,8 +399,14 @@ for i in range(len(cc_data)):
 
 # Combine all data, and determine the cohen d value
 # -------------------------------------------------
-combined = np.nansum(cc_data, axis=0)
-res = calculate_cohen_d_for_dataset(combined, times, star, planet, rv_range, rv_step)
+combined = (
+    np.nansum(cc_data[1:5])
+    + np.nansum(cc_data[6:11], axis=0)
+    + np.nansum(cc_data[12:17], axis=0)
+)
+res = calculate_cohen_d_for_dataset(
+    combined, times, star, planet, rv_range, rv_step, fix_kp_vsys=True
+)
 
 
 # Save the cohen d value
@@ -416,6 +422,6 @@ with open(fname, "w") as f:
 # set show to False if you do not want to see all the plots
 title = f"{star.name}_{planet.name}_{n1}_{n2}"
 folder = f"{rp}/plots/{star.name}_{planet.name}_{n1}_{n2}_ccf"
-plot_results(rv_array, cc_data, combined, res, title, folder, show=True)
+plot_results(rv_array, cc_data, combined, res, title, folder, show=False)
 
 pass

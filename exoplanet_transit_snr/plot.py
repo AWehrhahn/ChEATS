@@ -4,6 +4,7 @@ from os.path import dirname, join
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.interpolate import interp1d
 
 from .stats import gauss
 
@@ -19,7 +20,7 @@ def plot_cc_overview(
 
     for i in range(cc_data.shape[0]):
         plt.subplot(6, 3, i + 1)
-        plt.imshow(cc_data[i], aspect="auto", origin="lower")
+        plt.imshow(cc_data[i], aspect="auto", origin="lower", interpolation="none")
         if show_line:
             plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
     plt.suptitle(title)
@@ -45,7 +46,7 @@ def plot_cc_overview_details(
     n_ord = cc_data.shape[0]
     for i in range(n_ord):
         plt.clf()
-        plt.imshow(cc_data[i], aspect="auto", origin="lower")
+        plt.imshow(cc_data[i], aspect="auto", origin="lower", interpolation="none")
         if show_line:
             plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
         plt.suptitle(f"{title}\nSegment {i}")
@@ -78,8 +79,15 @@ def plot_combined(
     plt.figure(figsize=(12, 8))
     plt.clf()
 
-    vmin, vmax = np.nanpercentile(combined.ravel(), [5, 95])
-    plt.imshow(combined, aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
+    vmin, vmax = np.nanpercentile(combined.ravel(), [1, 99])
+    plt.imshow(
+        combined,
+        aspect="auto",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="none",
+    )
     plt.xlabel("rv [km/s]")
     xticks = plt.xticks()[0][1:-1]
     rv_ticks = np.linspace(xticks[0], xticks[-1], len(rv_array))
@@ -121,63 +129,100 @@ def plot_combined(
         plt.show()
 
 
-def plot_vsys_kp(res, title="", folder="", show=False):
-    plt.figure(figsize=(12, 8))
+def plot_vsys_kp(
+    res,
+    title="",
+    folder="",
+    plot_sums=True,
+    plot_rectangle=True,
+    plot_lines=True,
+    show=False,
+):
     plt.clf()
 
-    ax = plt.subplot(121)
-    plt.imshow(res["combined"], aspect="auto", origin="lower")
-    ax.add_patch(
-        plt.Rectangle(
-            (res["vsys_peak"] - res["vsys_width"], res["kp_peak"] - res["kp_width"]),
-            2 * res["vsys_width"],
-            2 * res["kp_width"],
-            fill=False,
-            color="red",
+    if plot_sums:
+        plt.figure(figsize=(12, 8))
+        ax = plt.subplot(121)
+    else:
+        fig, ax = plt.subplots(figsize=(6, 8))
+
+    # data = np.log(1 + np.abs(res["combined"]))
+    # data *= np.sign(res["combined"])
+    plt.imshow(res["combined"], aspect="auto", origin="lower", interpolation="none")
+    if plot_rectangle:
+        ax.add_patch(
+            plt.Rectangle(
+                (
+                    res["vsys_peak"] - res["vsys_width"],
+                    res["kp_peak"] - res["kp_width"],
+                ),
+                2 * res["vsys_width"],
+                2 * res["kp_width"],
+                fill=False,
+                color="red",
+            )
         )
-    )
+    if plot_lines:
+        n = res["combined"].shape[0]
+        x = np.interp(res["kp_expected"], res["kp"], np.arange(n)) + 0.5
+        n = res["combined"].shape[1]
+        plt.hlines(x, 0.5, n - 0.5, "k", "dashed")
+        n = res["combined"].shape[1]
+        x = np.interp(res["vsys_expected"], res["vsys"], np.arange(n)) + 0.5
+        n = res["combined"].shape[0]
+        plt.vlines(x, 0.5, n - 0.5, "k", "dashed")
 
-    plt.xlabel("vsys [km/s]")
-    xticks = plt.xticks()[0][1:-1]
-    rv_ticks = np.linspace(xticks[0], xticks[-1], len(res["vsys"]))
-    xticks_labels = np.interp(xticks, rv_ticks, res["vsys"])
-    xticks_labels = [f"{x:.3g}" for x in xticks_labels]
-    plt.xticks(xticks, labels=xticks_labels)
+    plt.xlabel("vsys [km/s]", fontsize="x-large")
+    xticks = np.unique(res["vsys"] // 10) * 10
+    xticks_labels = np.array([f"{x:.3g}" for x in xticks])
+    npoints = res["combined"].shape[1]
+    xticks = interp1d(res["vsys"], np.arange(npoints), fill_value="extrapolate")(xticks)
+    xticks_labels = xticks_labels[(xticks >= 0) & (xticks <= npoints)]
+    xticks = xticks[(xticks >= 0) & (xticks <= npoints)]
+    plt.xticks(xticks, labels=xticks_labels, fontsize="large")
 
-    plt.ylabel("Kp [km/s]")
-    yticks = plt.yticks()[0][1:-1]
-    yticks_labels = np.interp(yticks, np.arange(len(res["kp"])), res["kp"])
-    yticks_labels = [f"{y:.3g}" for y in yticks_labels]
-    plt.yticks(yticks, labels=yticks_labels)
+    plt.ylabel("Kp [km/s]", fontsize="x-large")
+    yticks = np.unique(res["kp"] // 50) * 50
+    yticks_labels = np.array([f"{x:.3g}" for x in yticks])
+    npoints = res["combined"].shape[0]
+    yticks = interp1d(res["kp"], np.arange(npoints), fill_value="extrapolate")(yticks)
+    yticks_labels = yticks_labels[(yticks >= 0) & (yticks <= npoints)]
+    yticks = yticks[(yticks >= 0) & (yticks <= npoints)]
+    plt.yticks(yticks, labels=yticks_labels, fontsize="large")
 
-    plt.subplot(222)
-    plt.plot(res["vsys"], res["vsys_mean"])
-    plt.vlines(
-        res["vsys"][res["vsys_peak"]],
-        np.min(res["vsys_mean"]),
-        res["vsys_mean"][res["vsys_peak"]],
-        "k",
-        "--",
-    )
-    if res["vsys_popt"] is not None:
-        plt.plot(res["vsys"], gauss(res["vsys"], *res["vsys_popt"]), "r--")
-    plt.xlabel("vsys [km/s]")
+    if plot_sums:
+        plt.subplot(222)
+        plt.plot(res["vsys"], res["vsys_mean"])
+        plt.vlines(
+            res["vsys"][res["vsys_peak"]],
+            np.min(res["vsys_mean"]),
+            res["vsys_mean"][res["vsys_peak"]],
+            "k",
+            "--",
+        )
+        if res["vsys_popt"] is not None:
+            plt.plot(res["vsys"], gauss(res["vsys"], *res["vsys_popt"]), "r--")
+        plt.xlabel("vsys [km/s]")
 
-    plt.subplot(224)
-    plt.plot(res["kp"], res["kp_mean"])
-    plt.vlines(
-        res["kp"][res["kp_peak"]],
-        np.min(res["kp_mean"]),
-        res["kp_mean"][res["kp_peak"]],
-        "k",
-        "--",
-    )
-    if res["kp_popt"] is not None:
-        plt.plot(res["kp"], gauss(res["kp"], *res["kp_popt"]), "r--")
-    plt.xlabel("Kp [km/s]")
+        plt.subplot(224)
+        plt.plot(res["kp"], res["kp_mean"])
+        plt.vlines(
+            res["kp"][res["kp_peak"]],
+            np.min(res["kp_mean"]),
+            res["kp_mean"][res["kp_peak"]],
+            "k",
+            "--",
+        )
+        if res["kp_popt"] is not None:
+            plt.plot(res["kp"], gauss(res["kp"], *res["kp_popt"]), "r--")
+        plt.xlabel("Kp [km/s]")
 
     plt.suptitle(title)
-    plot_fname = f"{folder}/ccresults_vsys_kp_plot.png"
+    if plot_sums:
+        plot_fname = f"{folder}/ccresults_vsys_kp_plot.png"
+    else:
+        plot_fname = f"{folder}/ccresults_vsys_kp_plot_detail.png"
+
     makedirs(dirname(plot_fname), exist_ok=True)
     plt.savefig(plot_fname)
     if show:
@@ -268,6 +313,7 @@ def plot_results(rv_array, cc_data, combined, res, title="", folder="", show=Fal
     )
     # Vsys - Kp Plot
     plot_vsys_kp(res, title=title, folder=folder, show=show)
+    plot_vsys_kp(res, title=title, folder=folder, plot_sums=False, show=show)
     # Cohen d distribution
     plot_cohend_distribution(res, title=title, folder=folder, show=show)
 
