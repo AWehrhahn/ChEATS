@@ -5,6 +5,7 @@ import sys
 from glob import glob
 from os.path import dirname, exists, join, realpath
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
@@ -143,12 +144,12 @@ def correct_data(data):
     wave, flux, uncs, times, segments, header = data
 
     # Remove excess flux points
-    flux[np.abs(flux) > 15000] = np.nan
+    flux[np.abs(flux) > 1] = np.nan
     # Fit uncertainty estimate of the observations
     # https://arxiv.org/pdf/2201.04025.pdf
     # 3 components as determined by elbow plot
     # as they contribute most of the variance
-    pca = PCA(3, svd_solver="full")
+    pca = PCA(4, svd_solver="full")
     for low, upp in zip(segments[:-1], segments[1:]):
         while True:
             # Use PCA model of the observations
@@ -165,24 +166,24 @@ def correct_data(data):
             if not np.any(idx):
                 break
 
-        # Make a new model
-        param = pca.fit_transform(np.nan_to_num(flux[:, low:upp], nan=0))
-        model = pca.inverse_transform(param)
-        resid = flux[:, low:upp] - model
+        # # Make a new model
+        # param = pca.fit_transform(np.nan_to_num(flux[:, low:upp], nan=0))
+        # model = pca.inverse_transform(param)
+        # resid = flux[:, low:upp] - model
 
-        # Fit the expected uncertainties
-        def func(x):
-            a, b = x[0], x[1]
-            sigma = np.sqrt(a * np.abs(flux[:, low:upp]) + b)
-            logL = -0.5 * np.nansum((resid / sigma) ** 2) - np.nansum(np.log(sigma))
-            return -logL
+        # # Fit the expected uncertainties
+        # def func(x):
+        #     a, b = x[0], x[1]
+        #     sigma = np.sqrt(a * np.abs(flux[:, low:upp]) + b)
+        #     logL = -0.5 * np.nansum((resid / sigma) ** 2) - np.nansum(np.log(sigma))
+        #     return -logL
 
-        res = minimize(
-            func, x0=[1, 1], bounds=[(0, None), (1e-16, None)], method="Nelder-Mead"
-        )
-        a, b = res.x
+        # res = minimize(
+        #     func, x0=[1, 1], bounds=[(0, None), (1e-16, None)], method="Nelder-Mead"
+        # )
+        # a, b = res.x
 
-        uncs[:, low:upp] = np.sqrt(a * np.abs(flux[:, low:upp]) + b)
+        # uncs[:, low:upp] = np.sqrt(a * np.abs(flux[:, low:upp]) + b)
 
     # Correct for the large scale variations
     for low, upp in zip(segments[:-1], segments[1:]):
@@ -201,35 +202,38 @@ def correct_data(data):
         flux[:, upp - 20 : upp] = np.nan
         uncs[:, low : low + 20] = np.nan
         uncs[:, upp - 20 : upp] = np.nan
-        spec = np.nanpercentile(flux[:, low:upp], 99, axis=1)[:, None]
-        flux[:, low:upp] /= spec
-        uncs[:, low:upp] /= spec
+        # spec = np.nanpercentile(flux[:, low:upp], 99, axis=1)[:, None]
+        # flux[:, low:upp] /= spec
+        # uncs[:, low:upp] /= spec
         # flux[:, low:upp] *= (1 - area)[:, None]
-        # spec = np.nanmedian(flux[:, low:upp], axis=0)
+        spec = np.nanmedian(flux[:, low:upp], axis=0)
         # ratio = np.nanmedian(flux[:, low:upp] / spec, axis=1)
         # model = spec[None, :] * ratio[:, None]
-        # flux[:, low:upp] /= np.nanpercentile(spec, 95)
+        flux[:, low:upp] /= np.nanpercentile(spec, 95)
+        uncs[:, low:upp] /= np.nanpercentile(spec, 95)
         # flux[:, low:upp] /= np.nanpercentile(flux[:, low:upp], 95, axis=1)[:, None]
+
+    pass
 
     # Find outliers by comparing with the median observation
     # correct for the scaling between observations with the factor r
-    for low, upp in zip(segments[:-1], segments[1:]):
-        spec = np.nanmedian(flux[:, low:upp], axis=0)
-        ratio = np.nanmedian(flux[:, low:upp] / spec, axis=1)
-        diff = flux[:, low:upp] - spec * ratio[:, None]
-        std = np.nanmedian(np.abs(np.nanmedian(diff, axis=0) - diff), axis=0)
-        std = np.clip(std, 0.01, 0.1, out=std)
-        idx = np.abs(diff) > 10 * std
-        flux[:, low:upp][idx] = np.nan  # (ratio[:, None] * spec)[idx]
-        uncs[:, low:upp][idx] = np.nan  # 1
+    # for low, upp in zip(segments[:-1], segments[1:]):
+    #     spec = np.nanmedian(flux[:, low:upp], axis=0)
+    #     ratio = np.nanmedian(flux[:, low:upp] / spec, axis=1)
+    #     diff = flux[:, low:upp] - spec * ratio[:, None]
+    #     std = np.nanmedian(np.abs(np.nanmedian(diff, axis=0) - diff), axis=0)
+    #     std = np.clip(std, 0.01, 0.1, out=std)
+    #     idx = np.abs(diff) > 10 * std
+    #     flux[:, low:upp][idx] = np.nan  # (ratio[:, None] * spec)[idx]
+    #     uncs[:, low:upp][idx] = np.nan  # 1
 
     # flux = np.nan_to_num(flux, nan=1, posinf=1, neginf=1, copy=False)
     # uncs = np.nan_to_num(uncs, nan=1, posinf=1, neginf=1, copy=False)
     uncs = np.clip(uncs, 0, None)
 
     # divide by the median spectrum
-    spec = np.nanmedian(flux, axis=0)
-    flux /= spec[None, :]
+    # spec = np.nanmedian(flux, axis=0)
+    # flux /= spec[None, :]
 
     # Correct for airmass
     # mean = np.nanmean(flux, axis=1)
@@ -242,7 +246,7 @@ def correct_data(data):
     return data
 
 
-def remove_tellurics(wave, flux):
+def remove_tellurics(wave, flux, airmass):
     fname = join(dirname(__file__), "../psg_trn.txt")
     df = pd.read_table(
         fname,
@@ -268,6 +272,18 @@ def remove_tellurics(wave, flux):
     mflux = df["total"]
     n = wave.shape[0] // 2
     mflux = np.interp(wave[n], mwave, mflux, left=1, right=1)
+
+    # from scipy.optimize import least_squares
+
+    # for low, upp in zip(segments[:-1], segments[1:]):
+    #     mask = ~np.isnan(flux[:, low:upp])
+    #     mask = np.any(mask, axis=0)
+    #     mask = np.arange(low, upp)[mask]
+
+    #     func = lambda c: (1 - np.polyval(c, airmass)[:, None] * (1 - mflux[mask][None, :]) - flux[:, mask]).ravel()
+    #     res = least_squares(func, [0, 1])
+    #     mfit = 1- (np.polyval(res.x, airmass)[:, None] * (1- mflux[low:upp][None, :]))
+
     idx = mflux < 0.90
     flux[:, idx] = np.nan
     return flux
@@ -275,8 +291,8 @@ def remove_tellurics(wave, flux):
 
 # define the names of the star and planet
 # as well as the datasets within the datasets folder
-star, planet = "WASP-107", "b"
-datasets = "220310_WASP107"
+star, planet = "WASP-127", "b"
+datasets = "220324_WASP127"
 
 # Load the nominal data for this star and planet from simbad/nasa exoplanet archive
 sdb = StellarDb()
@@ -292,17 +308,17 @@ telescope = EarthLocation.of_site("Paranal")
 # Define the +- range of the radial velocity points,
 # and the density of the sampling
 rv_range = 200
-rv_step = 0.25
+rv_step = 1
 
 if len(sys.argv) > 1:
     n1 = int(sys.argv[1])
     n2 = int(sys.argv[2])
 else:
-    n1, n2 = 0, 20
-elem = ("CO",)
+    n1, n2 = 0, 10
+elem = ("H2O",)
 
 # Where to find the data, might need to be adjusted
-data_dir = "/DATA/ESO/CRIRES+/GTO/220310_WASP107/1xAB_??"
+data_dir = "/DATA/ESO/CRIRES+/GTO/220324_WASP127/1xAB_??"
 # load the data from the fits files, returns several objects
 data = load_data(data_dir, load=False)
 wave, flux, uncs, times, segments, header = data
@@ -325,7 +341,32 @@ rv_bary = rv_bary.to_value("km/s")
 
 # Determine telluric lines
 # and remove the strongest ones
-flux = remove_tellurics(wave, flux)
+flux = remove_tellurics(wave, flux, airmass)
+
+
+# from exoplanet_transit_snr.stats import gaussfit
+# from scipy.interpolate import splev, splrep
+
+
+# for low, upp in zip(segments[:-1], segments[1:]):
+#     spec = np.nanmedian(flux[:, low:upp], axis=0)
+#     for i in range(len(flux)):
+#         mask = np.isnan(flux[i, low:upp]) | np.isnan(spec)
+#         mask = np.arange(low, upp)[~mask]
+#         a = flux[i, mask]
+#         v = spec[mask]
+#         a = (a - np.mean(a)) / (np.std(a) * len(a))
+#         v = (v - np.mean(v)) / (np.std(v))
+#         corr = np.correlate(a, v, mode="same")
+#         x = np.arange(corr.size)
+#         p0 = [np.max(corr), np.argmax(corr), 1, 0]
+#         curve, pfit = gaussfit(x, corr, p0)#, method="trf", loss="soft_l1")
+#         offset = pfit[1] - corr.size // 2
+#         x = np.arange(low, upp)
+#         xfit = x - offset
+#         # spl = splrep(x, flux[i, low:upp][~mask])
+#         # flux[i, low:upp][~mask] = splev(xfit, spl)
+#         flux[i, mask] = np.interp(xfit, x, flux[i, mask])
 
 
 @cache(cache_path=f"/tmp/{star.name}_{planet.name}.npz")
@@ -333,6 +374,11 @@ def ptr_spec(wave, star, planet, rv_range, elem=("H2O", "CO", "CO2")):
     wmin, wmax = wave.min() << u.AA, wave.max() << u.AA
     wmin *= 1 - rv_range / c_light
     wmax *= 1 + rv_range / c_light
+
+    mass_fractions = {"H2": 0.9, "He": 0.1}
+    for el in elem:
+        if el not in mass_fractions.keys():
+            mass_fractions[el] = 1e-3
     ptr = petitRADTRANS(
         wmin,
         wmax,
@@ -353,14 +399,7 @@ def ptr_spec(wave, star, planet, rv_range, elem=("H2O", "CO", "CO2")):
         continuum_species=(),
         # line_species=("CO", "CO2", "H2O"),
         line_species=elem,
-        mass_fractions={
-            "H2": 0.1,
-            "He": 0.9,
-            "CO": 1e-3,
-            "CO2": 1e-3,
-            "H2O": 1e-3,
-            "CH4": 1e-3,
-        },
+        mass_fractions=mass_fractions,
     )
     ptr.init_temp_press_profile(star, planet)
     ptr_wave, ptr_flux = ptr.run()
@@ -374,6 +413,15 @@ if hasattr(ptr_wave, "unit"):
     ptr_wave = ptr_wave.to_value(u.um)
 ptr_wave *= u.um.to(u.AA)
 
+# ptr_flux = gaussian_filter1d(ptr_flux, 10)
+
+# Load PSG transit spectrum
+# from exoplanet_transit_snr.stats import vac2air, air2vac
+# fname = join(dirname(__file__), "W127psg_trn.txt")
+# psg_data = pd.read_table(fname, comment="#", sep=r"\s+", header=None, names=["wave", "total", "H2", "He", "CO", "CH4", "H2O", "CO2", "O2", "O3", "Rayleigh", "CIA"])
+# psg_flux = 1 - psg_data["H2O"].values / ((planet.radius/star.radius)**2).to_value(1)
+# psg_wave = psg_data["wave"].values * u.um.to(u.AA)
+
 
 @cache(cache_path=f"/tmp/ccfref_{star.name}_{planet.name}.npz")
 def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
@@ -384,7 +432,7 @@ def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
 
 
 n = wave.shape[0] // 2
-clear_cache(ptr_ref, (wave[16], ptr_wave, ptr_flux, rv_range, rv_step))
+clear_cache(ptr_ref, (wave[n], ptr_wave, ptr_flux, rv_range, rv_step))
 ref = ptr_ref(wave[n], ptr_wave, ptr_flux, rv_range, rv_step)
 ref -= np.nanmin(ref, axis=1)[:, None]
 ref /= np.nanmax(ref, axis=1)[:, None]
@@ -451,49 +499,30 @@ elif elem[0] == "CO2":
 elif elem[0] == "CO":
     combined = np.nansum(cc_data[-6:], axis=0)
 else:
-    combined = np.nansum(cc_data, axis=0)
+    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[4:], axis=0)
 
+res = calculate_cohen_d_for_dataset(
+    combined,
+    times,
+    star,
+    planet,
+    rv_range,
+    rv_step,
+    kp_range=(-200, 200),
+    vsys_range=(-50, 50),
+)
 
-# res = calculate_cohen_d_for_dataset(
-#     combined,
-#     times,
-#     star,
-#     planet,
-#     rv_range,
-#     rv_step,
-# )
+# Save the cohen d value
+# fname = f"{rp}/results/cohen_d_{star.name}_{planet.name}_{n1}_{n2}.json"
+# cohend = {"cohen_d": res["d"], "sysrem_n": n2, "myrem_n": n1}
+# os.makedirs(dirname(fname), exist_ok=True)
+# with open(fname, "w") as f:
+#     json.dump(cohend, f)
 
-# # Plot all the results
-# elem = "_".join(elem)
-# title = f"{star.name}_{planet.name}_{n1}_{n2}_{elem}"
-# folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}_{elem}_real"
-
-# plot_results(rv_array, cc_data, combined, res, title=title, folder=folder)
-
-# first quarter
-sections = [0, 8, 16, 24, 32]
-n_sec = len(sections) - 1
+# Plot all the results
 elem = "_".join(elem)
-for i, (low, upp) in enumerate(zip(sections[:-1], sections[1:])):
-    res = calculate_cohen_d_for_dataset(
-        combined[low:upp],
-        times[low:upp],
-        star,
-        planet,
-        rv_range,
-        rv_step,
-    )
+title = f"{star.name}_{planet.name}_{n1}_{n2}_{elem}"
+folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}_{elem}_real"
 
-    # Plot all the results
-    title = f"{star.name}_{planet.name}_{n1}_{n2}_{elem}"
-    folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}_{elem}_real_{i+1}_{n_sec}"
-
-    plot_results(
-        rv_array,
-        cc_data[:, low:upp],
-        combined[low:upp],
-        res,
-        title=title,
-        folder=folder,
-    )
+plot_results(rv_array, cc_data, combined, res, title=title, folder=folder)
 pass

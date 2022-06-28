@@ -232,11 +232,17 @@ def run_cross_correlation(
 def cross_correlation_reference(wave, ptr_wave, ptr_flux, rv_range=100, rv_step=1):
     rv_points = int((2 * rv_range + 1) / rv_step)
     rv = np.linspace(-rv_range, rv_range, num=rv_points)
-    rep = splrep(ptr_wave, ptr_flux)
+    try:
+        rep = splrep(ptr_wave, ptr_flux)
+        interp_func = lambda w: splev(w, rep)
+    except ValueError:
+        print("Warning: Can not use spline interpolation, using linear instead")
+        interp_func = interp1d(ptr_wave, ptr_flux)
+
     reference = np.zeros((rv_points, wave.size))
     for i in tqdm(range(rv_points)):
         rv_factor = np.sqrt((1 - rv[i] / c_light) / (1 + rv[i] / c_light))
-        ref = splev(wave * rv_factor, rep)
+        ref = interp_func(wave * rv_factor)
         reference[i] = np.nan_to_num(ref)
 
     return reference

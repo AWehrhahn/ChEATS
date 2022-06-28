@@ -15,7 +15,7 @@ def plot_cc_overview(
     if show_line and vp_idx is None:
         raise ValueError("vp_idx is required if line is set to True")
 
-    plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(12, 8))
     plt.clf()
 
     for i in range(cc_data.shape[0]):
@@ -34,6 +34,7 @@ def plot_cc_overview(
     plt.savefig(plot_fname)
     if show:
         plt.show()
+    plt.close(fig)
 
 
 def plot_cc_overview_details(
@@ -42,7 +43,7 @@ def plot_cc_overview_details(
     if show_line and vp_idx is None:
         raise ValueError("vp_idx is required if line is set to True")
 
-    plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(12, 8))
     n_ord = cc_data.shape[0]
     for i in range(n_ord):
         plt.clf()
@@ -60,6 +61,7 @@ def plot_cc_overview_details(
         plt.savefig(plot_fname)
         if show:
             plt.show()
+        plt.close(fig)
 
 
 def plot_combined(
@@ -76,7 +78,7 @@ def plot_combined(
     if show_line and vp_idx is None:
         raise ValueError("vp_idx is required if line is set to True")
 
-    plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(12, 8))
     plt.clf()
 
     vmin, vmax = np.nanpercentile(combined.ravel(), [1, 99])
@@ -98,7 +100,7 @@ def plot_combined(
     if show_line:
         plt.plot(vp_idx, np.arange(len(vp_idx)), "r-.", alpha=0.5)
 
-    if in_transit is not None:
+    if in_transit is not None and np.any(in_transit):
         n_obs, n_points = combined.shape
         plt.hlines(
             np.arange(n_obs)[in_transit][0],
@@ -127,6 +129,23 @@ def plot_combined(
     plt.savefig(plot_fname)
     if show:
         plt.show()
+    plt.close(fig)
+
+
+def plot_combined_hist(combined, title="", folder="", show=False):
+    fig = plt.figure(figsize=(12, 8))
+    plt.clf()
+
+    plt.hist(combined.ravel(), bins="auto")
+    plt.suptitle(title)
+
+    plot_fname = f"{folder}/ccresult_combined_hist.png"
+
+    makedirs(dirname(plot_fname), exist_ok=True)
+    plt.savefig(plot_fname)
+    if show:
+        plt.show()
+    plt.close(fig)
 
 
 def plot_vsys_kp(
@@ -134,21 +153,30 @@ def plot_vsys_kp(
     title="",
     folder="",
     plot_sums=True,
-    plot_rectangle=True,
+    plot_rectangle=False,
     plot_lines=True,
     show=False,
 ):
     plt.clf()
 
     if plot_sums:
-        plt.figure(figsize=(12, 8))
+        fig = plt.figure(figsize=(12, 8))
         ax = plt.subplot(121)
     else:
         fig, ax = plt.subplots(figsize=(6, 8))
 
     # data = np.log(1 + np.abs(res["combined"]))
     # data *= np.sign(res["combined"])
-    plt.imshow(res["combined"], aspect="auto", origin="lower", interpolation="none")
+    vmax = np.nanmax(np.abs(res["combined"]))
+    vmin = -vmax
+    plt.imshow(
+        res["combined"],
+        aspect="auto",
+        origin="lower",
+        interpolation="none",
+        vmin=vmin,
+        vmax=vmax,
+    )
     if plot_rectangle:
         ax.add_patch(
             plt.Rectangle(
@@ -193,26 +221,31 @@ def plot_vsys_kp(
     if plot_sums:
         plt.subplot(222)
         plt.plot(res["vsys"], res["vsys_mean"])
-        plt.vlines(
-            res["vsys"][res["vsys_peak"]],
-            np.min(res["vsys_mean"]),
-            res["vsys_mean"][res["vsys_peak"]],
-            "k",
-            "--",
-        )
+
+        if plot_lines:
+            n = np.digitize(res["vsys_expected"], res["vsys"])
+            plt.vlines(
+                res["vsys_expected"],
+                np.min(res["vsys_mean"]),
+                res["vsys_mean"][n],
+                "k",
+                "--",
+            )
         if res["vsys_popt"] is not None:
             plt.plot(res["vsys"], gauss(res["vsys"], *res["vsys_popt"]), "r--")
         plt.xlabel("vsys [km/s]")
 
         plt.subplot(224)
         plt.plot(res["kp"], res["kp_mean"])
-        plt.vlines(
-            res["kp"][res["kp_peak"]],
-            np.min(res["kp_mean"]),
-            res["kp_mean"][res["kp_peak"]],
-            "k",
-            "--",
-        )
+        if plot_lines:
+            n = np.digitize(res["kp_expected"], res["kp"])
+            plt.vlines(
+                res["kp_expected"],
+                np.min(res["kp_mean"]),
+                res["kp_mean"][n],
+                "k",
+                "--",
+            )
         if res["kp_popt"] is not None:
             plt.plot(res["kp"], gauss(res["kp"], *res["kp_popt"]), "r--")
         plt.xlabel("Kp [km/s]")
@@ -227,10 +260,11 @@ def plot_vsys_kp(
     plt.savefig(plot_fname)
     if show:
         plt.show()
+    plt.close(fig)
 
 
 def plot_cohend_distribution(res, title="", folder="", show=False):
-    plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(12, 8))
     plt.clf()
 
     plt.hist(
@@ -254,6 +288,7 @@ def plot_cohend_distribution(res, title="", folder="", show=False):
     plt.savefig(plot_fname)
     if show:
         plt.show()
+    plt.close(fig)
 
 
 def plot_results(rv_array, cc_data, combined, res, title="", folder="", show=False):
@@ -311,6 +346,8 @@ def plot_results(rv_array, cc_data, combined, res, title="", folder="", show=Fal
         show=show,
         suffix=suffix,
     )
+    # histogram of combined
+    plot_combined_hist(combined, title=title, folder=folder, show=show)
     # Vsys - Kp Plot
     plot_vsys_kp(res, title=title, folder=folder, show=show)
     plot_vsys_kp(res, title=title, folder=folder, plot_sums=False, show=show)
