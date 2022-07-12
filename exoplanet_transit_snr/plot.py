@@ -153,7 +153,7 @@ def plot_vsys_kp(
     title="",
     folder="",
     plot_sums=True,
-    plot_rectangle=False,
+    plot_rectangle=True,
     plot_lines=True,
     show=False,
 ):
@@ -282,7 +282,7 @@ def plot_cohend_distribution(res, title="", folder="", show=False):
         label="out-of-trail",
     )
     plt.legend()
-    plt.suptitle(f"{title}\nCohen d: {res['d']}")
+    plt.suptitle(f"{title}\nWelch t: {res['t']}\nCohen d: {res['d']}")
     plot_fname = f"{folder}/ccresult_cohend.png"
     makedirs(dirname(plot_fname), exist_ok=True)
     plt.savefig(plot_fname)

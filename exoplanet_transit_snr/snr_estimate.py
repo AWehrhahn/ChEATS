@@ -27,7 +27,7 @@ from scipy.signal import correlate
 from scipy.special import binom
 from tqdm import tqdm
 
-from .stats import cohen_d, gauss, gaussfit
+from .stats import cohen_d, gauss, gaussfit, welch_t
 from .sysrem import Sysrem, SysremWithProjection
 
 # Speed of light in km/s
@@ -320,6 +320,9 @@ def calculate_cohen_d_for_dataset(
     vsys_range=(-20, 20),
     kp_range=(-150, 150),
     fix_kp_vsys=False,
+    selection=None,
+    vsys_width=3,
+    kp_width=60,
 ):
     phi = (datetime - planet.time_of_transit) / planet.period
     phi = phi.to_value(1)
@@ -336,6 +339,7 @@ def calculate_cohen_d_for_dataset(
     ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
     egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
     in_transit = (phi >= ingress) | (phi <= egress)
+    out_transit = ~in_transit
 
     rv_points = int(2 * rv_range / rv_step + 1)
     rv = np.linspace(-rv_range, rv_range, rv_points)
@@ -347,27 +351,37 @@ def calculate_cohen_d_for_dataset(
     kp = np.linspace(kp_min, kp_max, int((kp_max - kp_min + 1) // rv_step))
     combined = np.zeros((len(kp), len(vsys)))
     interpolator = interp1d(rv, data, kind="linear", bounds_error=False)
+    if selection is None:
+        selection = np.full(in_transit.shape, True)
+    elif selection == "IT":
+        selection = in_transit
+    elif selection == "OOT":
+        selection = out_transit
+    else:
+        # keep the points given
+        selection = selection
+
     for i, vs in enumerate(tqdm(vsys)):
         for j, k in enumerate(tqdm(kp, leave=False)):
             vp_loc = vs + k * np.sin(2 * np.pi * phi)
             # shifted = [np.interp(vp[i], rv, data[i], left=np.nan, right=np.nan) for i in range(len(vp))]
             shifted = np.diag(interpolator(vp_loc))
-            combined[j, i] = np.nansum(shifted)
+            combined[j, i] = np.nansum(shifted[selection])
 
     # Normalize to the number of input spectra
     combined /= data.shape[0]
     combined /= combined.std()
 
     # Normalize to median 0
-    median = np.nanmedian(combined)
-    combined -= median
+    # median = np.nanmedian(combined)
+    # combined -= median
 
     # Find peak
     if fix_kp_vsys:
         kp_peak = np.digitize(kp_expected, kp)
         vsys_peak = np.digitize(vsys_expected, vsys)
-        vsys_width = int(3 / rv_step)  # +-3 km/s
-        kp_width = int(40 / rv_step)  # +-10 km/s
+        vsys_width = int(vsys_width / rv_step)  # +-3 km/s
+        kp_width = int(kp_width / rv_step)  # +-60 km/s
         kp_popt = vsys_popt = None
         vsys_width_int = int(np.ceil(vsys_width)) // 4
         lower = max(vsys_peak - vsys_width_int, 0)
@@ -379,7 +393,7 @@ def calculate_cohen_d_for_dataset(
         mean_vsys = np.nanmean(combined[lower:upper, :], axis=0)
     else:
         kp_peak = combined.shape[0] // 2
-        kp_width = kp_peak
+        kp_width = int(kp_width / rv_step)
 
         for i in range(3):
             # Determine the peak position in vsys and kp
@@ -403,7 +417,7 @@ def calculate_cohen_d_for_dataset(
                 )
                 vsys_width = vsys_popt[2] / rv_step
             except RuntimeError:
-                vsys_width = 10
+                vsys_width = int(vsys_width / rv_step)
                 vsys_popt = None
                 break
 
@@ -427,7 +441,7 @@ def calculate_cohen_d_for_dataset(
                 )
                 kp_width = kp_popt[2] / rv_step
             except RuntimeError:
-                kp_width = 50
+                kp_width = int(kp_width / rv_step)
                 kp_popt = None
                 break
 
@@ -446,17 +460,28 @@ def calculate_cohen_d_for_dataset(
     mask[kp_low:kp_upp, vsys_low:vsys_upp] = True
 
     in_trail = combined[mask].ravel()
+
+    # kp_offset = kp_width * 2
+    # mask = np.full(combined.shape, False)
+    # kp_low = max(0, kp_peak - kp_width + kp_offset)
+    # kp_upp = min(kp.size, kp_peak + kp_width + kp_offset)
+    # vsys_low = max(0, vsys_peak - vsys_width)
+    # vsys_upp = min(vsys.size, vsys_peak + vsys_width)
+    # mask[kp_low:kp_upp, vsys_low:vsys_upp] = True
+
     out_trail = combined[~mask].ravel()
 
     hrange = (np.min(combined), np.max(combined))
-    bins = 100
+    bins = 50
     _, hbins = np.histogram(in_trail, bins=bins, range=hrange, density=True)
 
     # Calculate the cohen d between the 2 distributions
     d = cohen_d(in_trail, out_trail)
+    t = welch_t(in_trail, out_trail)
 
     res = {
         "d": d,
+        "t": t,
         "combined": combined,
         "vsys": vsys,
         "vsys_peak": vsys_peak,

@@ -35,6 +35,7 @@ class petitRADTRANS:
             "CO2": 1e-5,
             "CH4": 1e-6,
         },
+        mode="transmission",
     ):
         if prt is None:
             raise RuntimeError("petitRadtrans could not be imported")
@@ -73,9 +74,15 @@ class petitRADTRANS:
         self.p0 = None
         self.T_int = None
         self.T_equ = None
+        self.T_star = None
         self.temperature = None
+        self.mode = mode
 
     def init_temp_press_profile(self, star, planet):
+        # Define star parameters
+        self.T_star = star.teff.to_value("K")
+        self.R_star = star.radius.to_value("R_sun")
+        self.sma = planet.sma.to_value("AU")
         # Define planet parameters
         # Planet radius
         self.r_pl = planet.radius.to_value("cm")
@@ -105,25 +112,43 @@ class petitRADTRANS:
             raise RuntimeError("Initialize the Temperature-Pressure Profile first")
 
         # Calculate transmission spectrum
-        self.atmosphere.calc_transm(
-            self.temperature,
-            self.mass_fractions,
-            self.gravity,
-            self.mmw,
-            R_pl=self.r_pl,
-            P0_bar=self.p0,
-        )
+        if self.mode == "transmission":
+            self.atmosphere.calc_transm(
+                self.temperature,
+                self.mass_fractions,
+                self.gravity,
+                self.mmw,
+                R_pl=self.r_pl,
+                P0_bar=self.p0,
+            )
+            # Normalized transmission spectrum
+            # Step 1: transmission radius in units of the stellar radius
+            flux = self.atmosphere.transm_rad / self.r_star
+            # Step 2: Get the "area" that is covered by the planet
+            flux = 1 - flux ** 2
+        elif self.mode == "emission":
+            self.atmosphere.calc_flux(
+                self.temperature,
+                self.mass_fractions,
+                self.gravity,
+                self.mmw,
+                Tstar=self.T_star,
+                Rstar=self.R_star,
+                semimajoraxis=self.sma,
+            )
+            flux = (
+                self.atmosphere.flux / 1e-6
+            )  # 1e-6 erg cm**-2 s**-1 Hz**-1 = 1e-9 J/m**2
+            # Just normalize it
+            flux /= np.max(flux)
+            flux = 1 - flux
+        else:
+            raise ValueError(
+                f"Expected mode of ('transmission', 'emission') but received {self.mode}"
+            )
 
         # Wavelength in um
         wave = nc.c / self.atmosphere.freq / 1e-4
         wave = wave << u.um
-
-        # Normalized transmission spectrum
-        # Step 1: transmission radius in units of the stellar radius
-        flux = self.atmosphere.transm_rad / self.r_star
-        # flux -= flux.min()
-        # flux /= flux.max()
-        # Step 2: Get the "area" that is covered by the planet
-        flux = 1 - flux ** 2
 
         return wave, flux

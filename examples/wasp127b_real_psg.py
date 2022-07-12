@@ -343,6 +343,39 @@ rv_bary = rv_bary.to_value("km/s")
 # and remove the strongest ones
 flux = remove_tellurics(wave, flux, airmass)
 
+
+# Load petitRadtrans spectrum
+@cache(cache_path=f"/tmp/{star.name}_{planet.name}.npz")
+def ptr_spec(wave, star, planet, rv_range, elem=("H2O", "CO", "CO2")):
+    wmin, wmax = wave.min() << u.AA, wave.max() << u.AA
+    wmin *= 1 - rv_range / c_light
+    wmax *= 1 + rv_range / c_light
+
+    mass_fractions = {"H2": 0.9, "He": 0.1}
+    for el in elem:
+        if el not in mass_fractions.keys():
+            mass_fractions[el] = 1e-3
+    ptr = petitRADTRANS(
+        wmin,
+        wmax,
+        # The line species is more important than the exact composition of the atmosphere
+        rayleigh_species=(),
+        continuum_species=(),
+        line_species=elem,
+        mass_fractions=mass_fractions,
+    )
+    ptr.init_temp_press_profile(star, planet)
+    ptr_wave, ptr_flux = ptr.run()
+    return ptr_wave, ptr_flux
+
+
+clear_cache(ptr_spec, (wave, star, planet, rv_range))
+ptr_wave, ptr_flux = ptr_spec(wave, star, planet, rv_range)
+if hasattr(ptr_wave, "unit"):
+    # ptr_wave gets saved without the quantity information by the cache
+    ptr_wave = ptr_wave.to_value(u.um)
+ptr_wave *= u.um.to(u.AA)
+
 # Load PSG transit spectrum
 fname = join(dirname(__file__), "W127psg_trn_shr.txt")
 psg_data = pd.read_table(
@@ -365,16 +398,41 @@ psg_data = pd.read_table(
         "CIA",
     ],
 )
-ptr_flux = 1 - psg_data["total"].values * (star.radius / planet.radius).to_value(1) ** 2
-ptr_wave = psg_data["wave"].values * u.um.to(u.AA)
+psg_flux = 1 - psg_data["total"].values * (star.radius / planet.radius).to_value(1) ** 2
+psg_wave = psg_data["wave"].values * u.um.to(u.AA)
 
-ptr_wave, sort = np.unique(ptr_wave, return_index=True)
-# ptr_wave = ptr_wave[sort]
-ptr_flux = ptr_flux[sort]
+# Sort and remove duplicate values
+psg_wave, sort = np.unique(psg_wave, return_index=True)
+psg_flux = psg_flux[sort]
+
+# Find the doppler shift offset between PSG and PRT
+normalize = lambda x: (x - np.nanmin(x)) / (np.nanmax(x) - np.nanmin(x))
+ptr_flux_norm = normalize(ptr_flux)
+psg_flux_norm = normalize(psg_flux)
+
+interpolator = lambda x: np.interp(x, psg_wave, psg_flux_norm)
+
+
+def func(rv):
+    rv_factor = np.sqrt((1 - rv / c_light) / (1 + rv / c_light))
+    shifted = interpolator(ptr_wave * rv_factor)
+    resid = ptr_flux_norm - shifted
+    resid = np.nan_to_num(resid, copy=False)
+    return resid
+
+
+from scipy.optimize import least_squares
+
+rvel = 0
+rv_bounds = (-50, 50)
+res = least_squares(func, x0=rvel, loss="soft_l1", bounds=rv_bounds, jac="3-point")
+rvel = -res.x[0]
+
 
 # Add arbitrary doppler shift
-rv_offset = 8.25  # 12 star.radial_velocity.to_value("km/s")
-ptr_wave *= 1 - rv_offset / c_light
+rv_offset = rvel  # 12 star.radial_velocity.to_value("km/s")
+ptr_wave = psg_wave * (1 - rv_offset / c_light)
+ptr_flux = psg_flux
 
 
 @cache(cache_path=f"/tmp/ccfref_{star.name}_{planet.name}.npz")
