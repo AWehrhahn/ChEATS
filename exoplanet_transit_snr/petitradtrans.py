@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 from typing import Tuple
-from unittest import runner
 
 import numpy as np
+from astropy import constants
 from astropy import units as u
 from astropy.units import Quantity
 
@@ -63,7 +63,10 @@ class petitRADTRANS:
             self.mass_fractions[elem] = frac * np.ones_like(self.pressures)
 
         # TODO: should this be changed depending on the molecules?
-        self.mmw = 2.33 * np.ones_like(self.pressures)
+        MMW_H2 = 2.01588
+        MMW_He = 4.002602
+        mmw = mass_fractions["H2"] * MMW_H2 + mass_fractions["He"] * MMW_He
+        self.mmw = mmw * np.ones_like(self.pressures)
 
         # Parameters for the TP profile
         self.kappa_IR = 0.01  # opacity in the IR
@@ -78,7 +81,7 @@ class petitRADTRANS:
         self.temperature = None
         self.mode = mode
 
-    def init_temp_press_profile(self, star, planet):
+    def init_temp_press_profile(self, star, planet, inversion=False):
         # Define star parameters
         self.T_star = star.teff.to_value("K")
         self.R_star = star.radius.to_value("R_sun")
@@ -94,10 +97,15 @@ class petitRADTRANS:
         self.p0 = planet.atm_surface_pressure.to_value("bar")
 
         # Define temperature pressure profile
-        self.T_int = 200.0  # Internal temperature
         self.T_equ = planet.equilibrium_temperature(star.teff, star.radius).to_value(
             "K"
         )
+
+        # Using Eq2 from Thorngren, Gao, Fortney, 2019
+        # https://iopscience.iop.org/article/10.3847/2041-8213/ab43d0/pdf
+        self.T_int = planet.intrinsic_temperature(star.teff, star.radius).to_value("K")
+        # self.T_int = 100.0  # Intrinsic temperature
+
         self.temperature = nc.guillot_global(
             self.pressures,
             self.kappa_IR,
@@ -106,6 +114,18 @@ class petitRADTRANS:
             self.T_int,
             self.T_equ,
         )
+        # invert
+        if inversion:
+            self.temperature = self.temperature[::-1]
+
+        # import matplotlib.pyplot as plt
+        # plt.plot(self.temperature, self.pressures)
+        # plt.yscale("log")
+        # plt.gca().invert_yaxis()
+        # plt.xlabel("T [K]")
+        # plt.ylabel("P [bar]")
+        # plt.show()
+        # pass
 
     def run(self) -> Tuple[Quantity, np.ndarray]:
         if self.temperature is None:

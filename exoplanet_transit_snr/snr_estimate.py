@@ -315,6 +315,7 @@ def calculate_cohen_d_for_dataset(
     datetime,
     star,
     planet,
+    telescope,
     rv_range=100,
     rv_step=1,
     vsys_range=(-20, 20),
@@ -328,16 +329,23 @@ def calculate_cohen_d_for_dataset(
     phi = phi.to_value(1)
     # We only care about the fraction
     phi = phi % 1
+    # Fix the phase so it is continous
+    # it is circular anyways
+    phi[phi < 0.5] += 1
 
+    rv_bary = -star.coordinates.radial_velocity_correction(
+        obstime=datetime, location=telescope
+    ).to_value("km/s")
     vsys = star.radial_velocity.to_value("km/s")
     kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
-    vp = vsys + kp * np.sin(2 * np.pi * phi)
+    vp = vsys + kp * np.sin(2 * np.pi * phi) + rv_bary
+    vsys += np.mean(rv_bary)
 
     kp_expected = kp
     vsys_expected = vsys
 
     ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
-    egress = (planet.transit_duration / 2 / planet.period).to_value(1) % 1
+    egress = 1 + (planet.transit_duration / 2 / planet.period).to_value(1) % 1
     in_transit = (phi >= ingress) | (phi <= egress)
     out_transit = ~in_transit
 
@@ -373,8 +381,8 @@ def calculate_cohen_d_for_dataset(
     combined /= combined.std()
 
     # Normalize to median 0
-    # median = np.nanmedian(combined)
-    # combined -= median
+    median = np.nanmedian(combined)
+    combined -= median
 
     # Find peak
     if fix_kp_vsys:
