@@ -1,60 +1,40 @@
 # -*- coding: utf-8 -*-
-import json
 import os
 import sys
 from glob import glob
-from os.path import dirname, exists, join, realpath
+from os.path import basename, dirname, join, realpath
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
-from astropy.coordinates import AltAz, EarthLocation
+from astropy.coordinates import EarthLocation
 from astropy.io import fits
 from astropy.time import Time
-from cache_decorator import Cache as cache
 from exoorbit.orbit import Orbit
+from pysme.continuum_and_radial_velocity import determine_radial_velocity
+from pysme.iliffe_vector import Iliffe_vector
+from pysme.sme import SME_Structure
 from scipy.constants import speed_of_light
-from scipy.ndimage import gaussian_filter1d, median_filter
-from scipy.optimize import minimize
-from sklearn.decomposition import PCA
+from scipy.ndimage import binary_dilation, gaussian_filter1d, median_filter
 from tqdm import tqdm
 
 from exoplanet_transit_snr.petitradtrans import petitRADTRANS
-from exoplanet_transit_snr.plot import plot_results
 from exoplanet_transit_snr.snr_estimate import (
-    calculate_cohen_d_for_dataset,
     cross_correlation_reference,
+    kp_vsys_combine,
     run_cross_correlation_ptr,
 )
+from exoplanet_transit_snr.stats import nanmad
 from exoplanet_transit_snr.stellardb import StellarDb
 from exoplanet_transit_snr.sysrem import Sysrem
 
 c_light = speed_of_light * 1e-3
+path = realpath(join(dirname(__file__), "../plots"))
 
 
-def clear_cache(func, args=None, kwargs=None):
-    args = args if args is not None else ()
-    kwargs = kwargs if kwargs is not None else {}
-    cache_path = func.__cacher_instance._get_formatted_path(args, kwargs)
-    try:
-        os.remove(cache_path)
-    except FileNotFoundError:
-        pass
-
-
-def load_data(data_dir, load=False):
-    savefilename = realpath(join(data_dir, "../medium/spectra.npz"))
-    if load and exists(savefilename):
-        data = np.load(savefilename, allow_pickle=True)
-        fluxlist = data["flux"]
-        wavelist = data["wave"]
-        uncslist = data["uncs"]
-        times = Time(data["time"])
-        segments = data["segments"]
-        header = data["header"]
-        return wavelist, fluxlist, uncslist, times, segments, header
-
-    files_fname = join(data_dir, "cr2res_obs_nodding_extracted_combined.fits")
+def load_data(data_dir):
+    files_fname = join(data_dir, "cr2res_obs_nodding_extracted[AB].fits")
     files = glob(files_fname)
 
     flat_data_dir = "/DATA/ESO/CRIRES+/GTO/211028_LTTS1445Ab/??"
@@ -64,6 +44,7 @@ def load_data(data_dir, load=False):
     flat = fits.open(flat_fname)
 
     fluxlist, wavelist, uncslist, times = [], [], [], []
+    nodding = []
     for f in tqdm(files):
         hdu = fits.open(f)
         header = hdu[0].header
@@ -71,10 +52,23 @@ def load_data(data_dir, load=False):
         # i.e. the header info is ONLY the info from the first observation
         # in the sequence. Thus we add the expsoure time to get the center
         # of the four observations
-        time = Time(header["MJD-OBS"], format="mjd")
-        exptime = header["ESO DET SEQ1 EXPTIME"] << u.s
-        time += 2 * exptime
 
+        # Get the actual times of the observations from the original fits files
+        sof_fname = join(dirname(f), basename(dirname(f)) + ".sof")
+        with open(sof_fname) as sof_file:
+            sof = sof_file.readlines()
+
+        sof = [s.split() for s in sof]
+        sof = [s[0] for s in sof if s[1] == "OBS_NODDING_OTHER"]
+        sof = [join(dirname(data_dir), basename(s)) for s in sof]
+        headers = [fits.getheader(s) for s in sof]
+        nodpos = [h["ESO SEQ NODPOS"] for h in headers]
+        header = [h for i, h in enumerate(headers) if nodpos[i] == f[-6]][0]
+
+        time = Time(header["MJD-OBS"], format="mjd")
+        exptime = np.asarray(header["ESO DET SEQ1 EXPTIME"]) << u.s
+        time += exptime / 2
+        nodding += [f[-6]]
         fluxes, waves, uncses = [], [], []
 
         for i in [1, 2, 3]:
@@ -108,7 +102,7 @@ def load_data(data_dir, load=False):
     fluxlist = np.stack(fluxlist)
     wavelist = np.stack(wavelist)
     uncslist = np.stack(uncslist)
-
+    nodding = np.asarray(nodding)
     # Sort observations in time
     times = Time(times)
     sort = np.argsort(times)
@@ -117,6 +111,7 @@ def load_data(data_dir, load=False):
     wavelist = wavelist[sort]
     uncslist = uncslist[sort]
     times = times[sort]
+    nodding = nodding[sort]
 
     # Sort the segments by wavelength
     for i in range(len(wavelist)):
@@ -125,67 +120,55 @@ def load_data(data_dir, load=False):
         fluxlist[i] = fluxlist[i][sort]
         uncslist[i] = uncslist[i][sort]
 
-    os.makedirs(dirname(savefilename), exist_ok=True)
+    # Convert to AA
+    wavelist *= u.nm.to(u.AA)
 
-    np.savez(
-        savefilename,
-        flux=fluxlist,
-        wave=wavelist,
-        uncs=uncslist,
-        time=times,
-        segments=segments,
-        header=header,
-    )
-    return wavelist, fluxlist, uncslist, times, segments, header
+    return wavelist, fluxlist, uncslist, times, segments, header, nodding
+
+
+def determine_rv_offset(wave_A, spec_A, wave_B, spec_B, segments):
+    sme = SME_Structure()
+    sme.wave = [wave_A[low:upp] for low, upp in enum(segments)]
+    sme.spec = [spec_A[low:upp] for low, upp in enum(segments)]
+    syn_wave_B = Iliffe_vector([wave_B[low:upp] for low, upp in enum(segments)])
+    syn_spec_B = Iliffe_vector([spec_B[low:upp] for low, upp in enum(segments)])
+    sme.vrad_flag = "whole"
+    vrad = determine_radial_velocity(sme, syn_wave_B, syn_spec_B, range(18), whole=True)
+    return vrad
+
+
+def remove_outliers(flux, unc=None, copy=False):
+    if copy:
+        flux = np.copy(flux)
+        if unc is not None:
+            unc = np.copy(unc)
+
+    model = median_filter(flux, (5, 3))
+    resid = flux - model
+    std = nanmad(resid)
+    flux[flux > model + 5 * std] = np.nan
+    flux[flux < model - 10 * std] = np.nan
+
+    spec = np.nanmedian(flux, axis=0)
+    std = nanmad(flux - spec, axis=0)
+    flux[:, std > np.nanmedian(std) * 5] = np.nan
+
+    mask = np.isfinite(flux.ravel())
+    idx = np.where(~mask)[0]
+    x = np.arange(flux.size)
+    y = flux.ravel()
+    flux.ravel()[idx] = np.interp(idx, x[mask], y[mask])
+    if unc is not None:
+        y = unc.ravel()
+        unc.ravel()[idx] = np.interp(idx, x[mask], y[mask])
+    return flux, unc
 
 
 def correct_data(data):
-    wave, flux, uncs, times, segments, header = data
-
-    # Remove excess flux points
-    flux[np.abs(flux) > 15000] = np.nan
-    # Fit uncertainty estimate of the observations
-    # https://arxiv.org/pdf/2201.04025.pdf
-    # 3 components as determined by elbow plot
-    # as they contribute most of the variance
-    pca = PCA(3, svd_solver="full")
-    for low, upp in zip(segments[:-1], segments[1:]):
-        while True:
-            # Use PCA model of the observations
-            param = pca.fit_transform(np.nan_to_num(flux[:, low:upp], nan=0))
-            model = pca.inverse_transform(param)
-            resid = flux[:, low:upp] - model
-
-            # Clean up outliers
-            std = np.nanstd(resid)
-            idx = np.abs(resid) > 5 * std
-            resid[idx] = np.nan
-            flux[:, low:upp][idx] = model[idx]
-
-            if not np.any(idx):
-                break
-
-        # Make a new model
-        param = pca.fit_transform(np.nan_to_num(flux[:, low:upp], nan=0))
-        model = pca.inverse_transform(param)
-        resid = flux[:, low:upp] - model
-
-        # Fit the expected uncertainties
-        def func(x):
-            a, b = x[0], x[1]
-            sigma = np.sqrt(a * np.abs(flux[:, low:upp]) + b)
-            logL = -0.5 * np.nansum((resid / sigma) ** 2) - np.nansum(np.log(sigma))
-            return -logL
-
-        res = minimize(
-            func, x0=[1, 1], bounds=[(0, None), (1e-16, None)], method="Nelder-Mead"
-        )
-        a, b = res.x
-
-        uncs[:, low:upp] = np.sqrt(a * np.abs(flux[:, low:upp]) + b)
+    wave, flux, uncs, times, segments, header, nodding = data
 
     # Correct for the large scale variations
-    for low, upp in zip(segments[:-1], segments[1:]):
+    for low, upp in tqdm(enum(segments), total=len(segments) - 1, leave=False):
         spec = np.nanmedian(flux[:, low:upp], axis=0)
         mod = flux[:, low:upp] / spec
         mod = np.nan_to_num(mod, nan=1)
@@ -195,54 +178,26 @@ def correct_data(data):
         flux[:, low:upp] /= mod
         uncs[:, low:upp] /= mod
 
-    # area = orbit.stellar_surface_covered_by_planet(times).to_value(1)
-    for low, upp in zip(segments[:-1], segments[1:]):
+    # Remove the 20 edge pixels as they are bad
+    flux[:, 12186:12269] = np.nan
+    for low, upp in enum(segments):
         flux[:, low : low + 20] = np.nan
         flux[:, upp - 20 : upp] = np.nan
         uncs[:, low : low + 20] = np.nan
         uncs[:, upp - 20 : upp] = np.nan
-        spec = np.nanpercentile(flux[:, low:upp], 99, axis=1)[:, None]
-        flux[:, low:upp] /= spec
-        uncs[:, low:upp] /= spec
-        # flux[:, low:upp] *= (1 - area)[:, None]
-        # spec = np.nanmedian(flux[:, low:upp], axis=0)
-        # ratio = np.nanmedian(flux[:, low:upp] / spec, axis=1)
-        # model = spec[None, :] * ratio[:, None]
-        # flux[:, low:upp] /= np.nanpercentile(spec, 95)
-        # flux[:, low:upp] /= np.nanpercentile(flux[:, low:upp], 95, axis=1)[:, None]
-
-    # Find outliers by comparing with the median observation
-    # correct for the scaling between observations with the factor r
-    for low, upp in zip(segments[:-1], segments[1:]):
-        spec = np.nanmedian(flux[:, low:upp], axis=0)
-        ratio = np.nanmedian(flux[:, low:upp] / spec, axis=1)
-        diff = flux[:, low:upp] - spec * ratio[:, None]
-        std = np.nanmedian(np.abs(np.nanmedian(diff, axis=0) - diff), axis=0)
-        std = np.clip(std, 0.01, 0.1, out=std)
-        idx = np.abs(diff) > 10 * std
-        flux[:, low:upp][idx] = np.nan  # (ratio[:, None] * spec)[idx]
-        uncs[:, low:upp][idx] = np.nan  # 1
-
-    # flux = np.nan_to_num(flux, nan=1, posinf=1, neginf=1, copy=False)
-    # uncs = np.nan_to_num(uncs, nan=1, posinf=1, neginf=1, copy=False)
-    uncs = np.clip(uncs, 0, None)
 
     # divide by the median spectrum
     spec = np.nanmedian(flux, axis=0)
     flux /= spec[None, :]
+    uncs /= spec[None, :]
 
-    # Correct for airmass
-    # mean = np.nanmean(flux, axis=1)
-    # c0 = np.polyfit(airmass, mean, 1)
-    # # # res = least_squares(lambda c: np.polyval(c, airmass) - mean, c0, loss="soft_l1")
-    # ratio = np.polyval(c0, airmass)
-    # flux /= (mean * ratio)[:, None]
+    uncs = np.clip(uncs, 0, None)
 
-    data = wave, flux, uncs, times, segments, header
+    data = wave, flux, uncs, times, segments, header, nodding
     return data
 
 
-def remove_tellurics(wave, flux):
+def remove_tellurics(wave, flux, rv_bary=0):
     fname = join(dirname(__file__), "../psg_trn.txt")
     df = pd.read_table(
         fname,
@@ -267,10 +222,69 @@ def remove_tellurics(wave, flux):
     mwave = df["wave"] * u.nm.to(u.AA)
     mflux = df["total"]
     n = wave.shape[0] // 2
-    mflux = np.interp(wave[n], mwave, mflux, left=1, right=1)
+    mflux = np.interp(wave[n], mwave * (1 - rv_bary / c_light), mflux, left=1, right=1)
     idx = mflux < 0.90
+    idx = binary_dilation(idx, iterations=10)
     flux[:, idx] = np.nan
     return flux
+
+
+def ptr_spec(wave, star, planet, rv_range, elem=("H2O", "CO", "CO2")):
+    wmin, wmax = wave.min() << u.AA, wave.max() << u.AA
+    wmin *= 1 - rv_range / c_light
+    wmax *= 1 + rv_range / c_light
+
+    mass_fractions = {
+        "H2": 0.74,
+        "He": 0.24,
+        "TiO": 1e-3,
+    }
+    for el in elem:
+        if el not in ["H2", "He", "TiO"]:
+            mass_fractions[el] = 1e-3
+
+    ptr = petitRADTRANS(
+        wmin,
+        wmax,
+        line_species=("TiO",),
+        mass_fractions=mass_fractions,
+    )
+    ptr.init_temp_press_profile(star, planet)
+    cont_wave, cont_flux = ptr.run()
+
+    ptr = petitRADTRANS(
+        wmin,
+        wmax,
+        line_species=elem,
+        mass_fractions=mass_fractions,
+    )
+    ptr.init_temp_press_profile(star, planet)
+    ptr_wave, ptr_flux = ptr.run()
+
+    # Assuming that cont_wave == ptr_wave
+    ptr_flux /= cont_flux
+
+    return ptr_wave, ptr_flux
+
+
+def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
+    ref = cross_correlation_reference(
+        wave, ptr_wave, ptr_flux, rv_range=rv_range, rv_step=rv_step
+    )
+    return ref
+
+
+def run_sysrem(flux, uncs, segments, n2):
+    corrected_flux = np.zeros_like(flux)
+    for low, upp in enum(segments):
+        sysrem = Sysrem(flux[:, low:upp], errors=uncs[:, low:upp])
+        corrected_flux[:, low:upp], *_ = sysrem.run(n2)
+    return corrected_flux
+
+
+def enum(segments):
+    for i in range(len(segments) - 1):
+        yield segments[i], segments[i + 1]
 
 
 # define the names of the star and planet
@@ -285,6 +299,10 @@ star = sdb.get(star)
 planet = star.planets[planet]
 # Temporary Fix, while the units in the NASA Exoplanet Archive are in the wrong units
 planet.transit_duration = planet.transit_duration.to_value(u.day) * u.hour
+planet.equilibrium_temperature = lambda x, y: 736 * u.K
+
+# based on alternative in https://iopscience.iop.org/article/10.3847/2041-8213/aabfce/pdf
+# planet.intrinsic_temperature = lambda x, y: 500 * u.K
 
 orbit = Orbit(star, planet)
 telescope = EarthLocation.of_site("Paranal")
@@ -295,205 +313,262 @@ rv_range = 200
 rv_step = 0.25
 
 if len(sys.argv) > 1:
-    n1 = int(sys.argv[1])
+    elem = (sys.argv[1],)
+    n1 = 0
     n2 = int(sys.argv[2])
 else:
-    n1, n2 = 0, 20
-elem = ("CO",)
+    n1, n2 = 0, 15
+    elem = ("CO",)
+elem_str = "_".join(elem)
 
 # Where to find the data, might need to be adjusted
 data_dir = "/DATA/ESO/CRIRES+/GTO/220310_WASP107/1xAB_??"
 # load the data from the fits files, returns several objects
-data = load_data(data_dir, load=False)
-wave, flux, uncs, times, segments, header = data
-wave *= u.nm.to(u.AA)
+data = load_data(data_dir)
+wave, flux, uncs, times, segments, header, nodding = data
+
+# Remove obvious excess flux points
+flux[flux < 0] = np.nan
+flux[flux > np.nanpercentile(flux.ravel(), 99) * 1.5] = np.nan
+
+# Normalize by the 95th percentile of each segment
+for low, upp in enum(segments):
+    flux[:, low:upp] /= np.nanpercentile(flux[:, low:upp], 95, axis=1)[:, None]
+
+# Split the two nodding positions
+wave_A = wave[nodding == "A"][0]
+wave_B = wave[nodding == "B"][0]
+flux_A = flux[nodding == "A"]
+flux_B = flux[nodding == "B"]
+uncs_A = uncs[nodding == "A"]
+uncs_B = uncs[nodding == "B"]
+
+# Manual masking
+flux_A[:, 22956:22960] = np.nan
+flux_A[:, 12186:12269] = np.nan
+flux_B[:, 12186:12269] = np.nan
+
+# Automatic outlier removal
+flux_A, uncs_A = remove_outliers(flux_A, uncs_A)
+flux_B, uncs_B = remove_outliers(flux_B, uncs_B)
+
+# Recombine A and B nodding positions
+flux[nodding == "A"] = flux_A
+flux[nodding == "B"] = flux_B
+uncs[nodding == "A"] = uncs_A
+uncs[nodding == "B"] = uncs_B
+
+# Determine the radial velocity offset between A and B nodding
+spec_A = np.nanmedian(flux_A, axis=0)
+spec_B = np.nanmedian(flux_B, axis=0)
+vrad = determine_rv_offset(wave_A, spec_A, wave_B, spec_B, segments)
+
+# Barycentric correction
+# shift everything into the restframe of the star
+rv_bary = -star.coordinates.radial_velocity_correction(
+    obstime=times, location=telescope
+).to_value("km/s")
+
+# Correct for barycentric and rv offset between nodding positions
+# Interpolate to a common wavelength grid
+# correct for differences in the wavelength solution between A and B nodding positions
+
+wave_avg = np.nanmean(np.unique(wave, axis=0), axis=0)
+for i in range(len(wave)):
+    if nodding[i] == "B":
+        vel = rv_bary[i] - vrad
+    else:
+        vel = rv_bary[i]
+    vel = 1 - vel / c_light
+    flux[i] = np.interp(wave_avg, wave[i] * vel, flux[i])
+    wave[i] = wave_avg
 
 # Correct outliers, basic continuum normalization
 data = correct_data(data)
-wave, flux, uncs, times, segments, header = data
-
-# Calculate airmass
-altaz = star.coordinates.transform_to(AltAz(obstime=times, location=telescope))
-airmass = altaz.secz.value
-
-# Barycentric correction
-rv_bary = -star.coordinates.radial_velocity_correction(
-    obstime=times, location=telescope
-)
-rv_bary -= np.mean(rv_bary)
-rv_bary = rv_bary.to_value("km/s")
+wave, flux, uncs, times, segments, header, nodding = data
 
 # Determine telluric lines
 # and remove the strongest ones
-flux = remove_tellurics(wave, flux)
+flux = remove_tellurics(wave, flux, rv_bary=np.mean(rv_bary))
 
+# Calculate airmass
+# altaz = star.coordinates.transform_to(AltAz(obstime=times, location=telescope))
+# airmass = altaz.secz.value
 
-@cache(cache_path=f"/tmp/{star.name}_{planet.name}.npz")
-def ptr_spec(wave, star, planet, rv_range, elem=("H2O", "CO", "CO2")):
+# Calculate planet transmission spectrum
+# with petitradtrans
+if elem is None:
     wmin, wmax = wave.min() << u.AA, wave.max() << u.AA
     wmin *= 1 - rv_range / c_light
     wmax *= 1 + rv_range / c_light
-    ptr = petitRADTRANS(
-        wmin,
-        wmax,
-        # The line species is more important than the exact composition of the atmosphere
-        # Earth-like
-        # rayleigh_species=("N2", "O2"),
-        # continuum_species=("N2", "O2"),
-        # line_species=("H2O", "CO2"),
-        # mass_fractions={"N2": 0.78, "O2": 0.2, "Ar": 0.01, "CO2": 4e-4, "H2O": 1e-3},
-        # Jupiter-like
-        # line_species=("H2O",),
-        # mass_fractions={"H2": 0.9, "He": 0.1, "H2O": 1e-3},
-        # CO2 lines
-        # line_species=("CO2", ),
-        # mass_fractions={"H2": 0.9, "He": 0.1, "CO2": 1e-3}
-        # CO-CO2 lines
-        rayleigh_species=(),
-        continuum_species=(),
-        # line_species=("CO", "CO2", "H2O"),
-        line_species=elem,
-        mass_fractions={
-            "H2": 0.1,
-            "He": 0.9,
-            "CO": 1e-3,
-            "CO2": 1e-3,
-            "H2O": 1e-3,
-            "CH4": 1e-3,
-        },
-    )
-    ptr.init_temp_press_profile(star, planet)
-    ptr_wave, ptr_flux = ptr.run()
-    return ptr_wave, ptr_flux
+    ptr_wave = np.linspace(wmin, wmax, 10_000)
+    ptr_flux = np.ones_like(ptr_wave)
+else:
+    ptr_wave, ptr_flux = ptr_spec(wave, star, planet, rv_range, elem)
+    ptr_wave = ptr_wave.to_value(u.AA)
 
-
-clear_cache(ptr_spec, (wave, star, planet, rv_range, elem))
-ptr_wave, ptr_flux = ptr_spec(wave, star, planet, rv_range, elem)
-if hasattr(ptr_wave, "unit"):
-    # ptr_wave gets saved without the quantity information by the cache
-    ptr_wave = ptr_wave.to_value(u.um)
-ptr_wave *= u.um.to(u.AA)
-
-
-@cache(cache_path=f"/tmp/ccfref_{star.name}_{planet.name}.npz")
-def ptr_ref(wave, ptr_wave, ptr_flux, rv_range, rv_step):
-    ref = cross_correlation_reference(
-        wave, ptr_wave, ptr_flux, rv_range=rv_range, rv_step=rv_step
-    )
-    return ref
-
-
+# precompute the reference spectrum at different rv offsets
 n = wave.shape[0] // 2
-clear_cache(ptr_ref, (wave[16], ptr_wave, ptr_flux, rv_range, rv_step))
 ref = ptr_ref(wave[n], ptr_wave, ptr_flux, rv_range, rv_step)
-ref -= np.nanmin(ref, axis=1)[:, None]
-ref /= np.nanmax(ref, axis=1)[:, None]
-
-# Run SYSREM
-rp = realpath(join(dirname(__file__), "../cache"))
-
-
-@cache(cache_path=f"{rp}/sysrem_{{n1}}_{{n2}}_{star.name}_{planet.name}.npz")
-def run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass):
-    corrected_flux = np.zeros_like(flux)
-    # n = wave.shape[0] // 2
-    for low, upp in zip(segments[:-1], segments[1:]):
-        # sysrem = SysremWithProjection(
-        #     wave[n, low:upp], flux[:, low:upp], rv_bary, airmass, uncs
-        # )
-        # corrected_flux[:, low:upp], *_ = sysrem.run(n1)
-        # sysrem = Sysrem(corrected_flux[:, low:upp])
-        # corrected_flux[:, low:upp], *_ = sysrem.run(n2)
-        sysrem = Sysrem(flux[:, low:upp], errors=uncs[:, low:upp])
-        corrected_flux[:, low:upp], *_ = sysrem.run(n2)
-        # resid, model = sysrem.run(n2)
-        # model = model[0] + np.nansum(model[1:], axis=0)
-        # corrected_flux[:, low:upp] = flux[:, low:upp] / model
-    return corrected_flux
-
+if elem is not None:
+    ref -= 1
 
 # Run Sysrem
 # the first number is the number of sysrem iterations accounting for the barycentric velocity
 # the second is for regular sysrem iterations
-clear_cache(run_sysrem, (flux, uncs, segments, n1, n2, rv_bary, airmass))
-corrected_flux = run_sysrem(flux, uncs, segments, n1, n2, rv_bary, airmass)
+corrected_flux = run_sysrem(flux, uncs, segments, n2)
+mad, diff = nanmad(corrected_flux, return_diff=True)
+idx = diff > 5 * mad
+corrected_flux[idx] = np.nan
 
 # Normalize by the standard deviation in this wavelength column
-corrected_flux -= np.nanmean(corrected_flux, axis=0)
-std = np.nanstd(corrected_flux, axis=0)
+corrected_flux -= np.nanmedian(corrected_flux, axis=0)
+std = nanmad(corrected_flux, axis=0)
 std[std == 0] = 1
 corrected_flux /= std
 
 # Run the cross correlation between the sysrem residuals and the expected planet spectrum
-cache_suffix = f"_{n1}_{n2}_{star.name}_{planet.name}".lower().replace(" ", "_")
 cc_data, rv_array = run_cross_correlation_ptr(
     corrected_flux,
     ref,
     segments,
     rv_range=rv_range,
     rv_step=rv_step,
-    load=False,
-    data_dir=data_dir,
-    cache_suffix=cache_suffix,
 )
 
-# Normalize the cross correlation of each segment
-for i in range(len(cc_data)):
-    cc_data[i] -= np.nanmean(cc_data[i], axis=1)[:, None]
-    cc_data[i] /= np.nanstd(cc_data[i], axis=1)[:, None]
+vsys = star.radial_velocity.to_value("km/s")
+kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
+kp_range = (-250 - kp, 250 - kp)
+vsys_range = (-150 - vsys, 150 - vsys)
+for i, (low, upp) in enumerate(enum(segments)):
+    selection = "IT"
+    kp, vsys, combined = kp_vsys_combine(
+        cc_data[i],
+        times,
+        star,
+        planet,
+        telescope,
+        rv_range,
+        rv_step,
+        selection=selection,
+        vsys_range=vsys_range,
+        kp_range=kp_range,
+        barycentric_correction=False,
+        normalize=False,
+    )
+
+    title = ""
+    folder = join(
+        path,
+        f"{star.name}_{planet.name}_{n1}_{n2}_{elem_str}_real_seg{i}_{selection}",
+    )
+
+    os.makedirs(folder, exist_ok=True)
+    np.savez(
+        join(folder, "data.npz"),
+        res=combined,
+        selection=selection,
+        rv_array=rv_array,
+        rv_step=rv_step,
+        cc_data=cc_data[i],
+        corrected_flux=corrected_flux[:, low:upp],
+        times=times.mjd,
+        kp=kp,
+        vsys=vsys,
+    )
 
 if len(elem) == 3:
-    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[4:], axis=0)
+    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[3:], axis=0)
 elif elem[0] == "H2O":
-    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[4:], axis=0)
+    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[3:], axis=0)
 elif elem[0] == "CO2":
-    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[4:-2], axis=0)
+    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[3:9], axis=0)
 elif elem[0] == "CO":
     combined = np.nansum(cc_data[-6:], axis=0)
 else:
-    combined = np.nansum(cc_data, axis=0)
+    combined = np.nansum(cc_data[:2], axis=0) + np.nansum(cc_data[3:], axis=0)
 
-
-# res = calculate_cohen_d_for_dataset(
-#     combined,
-#     times,
-#     star,
-#     planet,
-#     rv_range,
-#     rv_step,
-# )
-
-# # Plot all the results
-# elem = "_".join(elem)
-# title = f"{star.name}_{planet.name}_{n1}_{n2}_{elem}"
-# folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}_{elem}_real"
-
-# plot_results(rv_array, cc_data, combined, res, title=title, folder=folder)
-
-# first quarter
-sections = [0, 8, 16, 24, 32]
+# split into time series?
+sections = [0, len(times)]
 n_sec = len(sections) - 1
-elem = "_".join(elem)
-for i, (low, upp) in enumerate(zip(sections[:-1], sections[1:])):
-    res = calculate_cohen_d_for_dataset(
+
+vsys = star.radial_velocity.to_value("km/s")
+kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
+kp_range = (-250 - kp, 250 - kp)
+vsys_range = (-150 - vsys, 150 - vsys)
+
+for i, (low, upp) in enumerate(enum(segments)):
+    selection = "IT"
+    kp, vsys, kp_vsys = kp_vsys_combine(
         combined[low:upp],
         times[low:upp],
         star,
         planet,
+        telescope,
         rv_range,
         rv_step,
+        selection=selection,
+        vsys_range=vsys_range,
+        kp_range=kp_range,
+        barycentric_correction=False,
     )
 
-    # Plot all the results
-    title = f"{star.name}_{planet.name}_{n1}_{n2}_{elem}"
-    folder = f"plots/{star.name}_{planet.name}_{n1}_{n2}_{elem}_real_{i+1}_{n_sec}"
+    # Save the results
+    folder = join(
+        path,
+        f"{star.name}_{planet.name}_{n1}_{n2}_{elem_str}_real_{i+1}_{n_sec}_{selection}",
+    )
 
-    plot_results(
-        rv_array,
-        cc_data[:, low:upp],
+    os.makedirs(folder, exist_ok=True)
+    np.savez(
+        join(folder, "data.npz"),
+        res=kp_vsys,
+        kp=kp,
+        vsys=vsys,
+        selection=selection,
+        rv_array=rv_array,
+        rv_step=rv_step,
+        cc_data=cc_data[:, low:upp],
+        combined=combined[low:upp],
+        corrected_flux=corrected_flux[low:upp],
+        times=times[low:upp].mjd,
+    )
+
+    # Run it again, but only for out of transit data
+    selection = "OOT"
+    kp, vsys, kp_vsys = kp_vsys_combine(
         combined[low:upp],
-        res,
-        title=title,
-        folder=folder,
+        times[low:upp],
+        star,
+        planet,
+        telescope,
+        rv_range,
+        rv_step,
+        selection=selection,
+        kp_range=kp_range,
+        vsys_range=vsys_range,
+        barycentric_correction=False,
     )
+
+    # And save to a different directory
+    folder = join(
+        path,
+        f"{star.name}_{planet.name}_{n1}_{n2}_{elem_str}_real_{i+1}_{n_sec}_{selection}",
+    )
+
+    os.makedirs(folder, exist_ok=True)
+    np.savez(
+        join(folder, "data.npz"),
+        res=kp_vsys,
+        kp=kp,
+        vsys=vsys,
+        selection=selection,
+        rv_array=rv_array,
+        rv_step=rv_step,
+        cc_data=cc_data[:, low:upp],
+        combined=combined[low:upp],
+        corrected_flux=corrected_flux[low:upp],
+        times=times[low:upp].mjd,
+    )
+
 pass

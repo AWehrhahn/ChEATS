@@ -6,9 +6,7 @@
 from __future__ import division, print_function
 
 import warnings
-from pickle import NONE
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 # import pyximport

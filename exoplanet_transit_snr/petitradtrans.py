@@ -65,7 +65,9 @@ class petitRADTRANS:
         # TODO: should this be changed depending on the molecules?
         MMW_H2 = 2.01588
         MMW_He = 4.002602
-        mmw = mass_fractions["H2"] * MMW_H2 + mass_fractions["He"] * MMW_He
+        mmw = (mass_fractions["H2"] * MMW_H2 + mass_fractions["He"] * MMW_He) / (
+            mass_fractions["H2"] + mass_fractions["He"]
+        )
         self.mmw = mmw * np.ones_like(self.pressures)
 
         # Parameters for the TP profile
@@ -122,6 +124,7 @@ class petitRADTRANS:
         # plt.plot(self.temperature, self.pressures)
         # plt.yscale("log")
         # plt.gca().invert_yaxis()
+        # plt.gca().invert_xaxis()
         # plt.xlabel("T [K]")
         # plt.ylabel("P [bar]")
         # plt.show()

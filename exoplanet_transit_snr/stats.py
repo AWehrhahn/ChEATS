@@ -105,3 +105,20 @@ def gaussfit(x, y, p0=None, **kwargs):
 
     popt, _ = curve_fit(gauss, x, y, p0=p0, **kwargs)
     return gauss(x, *popt), popt
+
+
+def nanmad(arr, axis=None, return_diff=False):
+    median = np.nanmedian(arr, axis=axis)
+    if axis is not None:
+        if axis == 0:
+            median = median[None, ...]
+        else:
+            shape = [*median.shape[:axis], 1, *median.shape[axis:]]
+            median.shape = shape
+    diff = arr - median
+    mad = np.nanmedian(np.abs(diff), axis=axis)
+    # Convert to standard deviations
+    mad *= 1.4826
+    if return_diff:
+        return mad, diff
+    return mad

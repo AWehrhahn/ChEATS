@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
-from ctypes import c_long
 from glob import glob
 from itertools import combinations
 from os import makedirs
 from os.path import basename, dirname, join, realpath
-from typing import Tuple, Union
+from typing import Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
@@ -14,20 +12,15 @@ from astropy.constants import c
 from astropy.io import fits
 from astropy.time import Time
 from exoorbit.bodies import Planet, Star
-
-# from cats.extractor.runner import CatsRunner
-# from cats.simulator.detector import Crires
-# from cats.spectrum import SpectrumArray
 from exoorbit.orbit import Orbit
 from genericpath import exists
 from scipy.constants import speed_of_light
 from scipy.interpolate import interp1d, splev, splrep
-from scipy.optimize import curve_fit
 from scipy.signal import correlate
 from scipy.special import binom
 from tqdm import tqdm
 
-from .stats import cohen_d, gauss, gaussfit, welch_t
+from .stats import cohen_d, gauss, gaussfit, nanmad, welch_t
 from .sysrem import Sysrem, SysremWithProjection
 
 # Speed of light in km/s
@@ -186,7 +179,7 @@ def run_cross_correlation(
     np.save("corrected_flux_LTT1445A_projected_1.npy", corrected_flux)
 
     # Normalize by the standard deviation in this wavelength column
-    std = np.nanstd(corrected_flux, axis=0)
+    std = nanmad(corrected_flux, axis=0)
     std[std == 0] = 1
     corrected_flux /= std
 
@@ -217,8 +210,8 @@ def run_cross_correlation(
             # a = interp1d(wave[i] * rva, a, kind="linear", fill_value=1, bounds_error=False)(wave[n])
             # v = interp1d(wave[j] * rvv, v, kind="linear", fill_value=1, bounds_error=False)(wave[n])
 
-        a = (a - np.mean(a)) / (np.std(a) * len(a))
-        v = (v - np.mean(v)) / (np.std(v))
+        a = (a - np.nanmedian(a)) / (nanmad(a) * len(a))
+        v = (v - np.nanmedian(v)) / (nanmad(v))
         corr[i, j] = correlate(a, v, mode="same")
 
     correlation = {str(nsysrem): corr}
@@ -255,21 +248,8 @@ def run_cross_correlation_ptr(
     rv_range: float = 100,
     rv_step: float = 1,
     skip: Tuple = None,
-    load: bool = False,
-    data_dir: str = None,
-    cache_suffix: str = "",
 ):
     rv_points = int(2 * rv_range / rv_step + 1)
-
-    if data_dir is not None:
-        savefilename = realpath(
-            join(data_dir, f"../medium/cross_correlation{cache_suffix}.npz")
-        )
-        if load and exists(savefilename):
-            data = np.load(savefilename)
-            rv_array = data["rv_array"]
-            data = data["corr"]
-            return data, rv_array
 
     skip_mask = np.full(corrected_flux.shape[1], True)
     if skip is not None:
@@ -299,18 +279,14 @@ def run_cross_correlation_ptr(
                 a = corrected_flux[i, low:upp]
                 v = reference[j, low:upp]
 
-                corr[k, i, j] += np.nansum(a * v)
+                a = (a - np.nanmedian(a)) / nanmad(a)
+                v = (v - np.nanmedian(v)) / nanmad(v)
+                corr[k, i, j] += np.nanmean(a * v)
 
-                # a = (a - np.nanmean(a)) / np.nanstd(a)
-                # v = (v - np.nanmean(v)) / np.nanstd(v)
-                # corr[k, i, j] += np.nanmean(a * v)
-
-    if data_dir is not None:
-        np.savez(savefilename, corr=corr, rv_array=rv_array)
     return corr, rv_array
 
 
-def calculate_cohen_d_for_dataset(
+def kp_vsys_combine(
     data,
     datetime,
     star,
@@ -318,12 +294,11 @@ def calculate_cohen_d_for_dataset(
     telescope,
     rv_range=100,
     rv_step=1,
-    vsys_range=(-20, 20),
+    vsys_range=(-70, 70),
     kp_range=(-150, 150),
-    fix_kp_vsys=False,
     selection=None,
-    vsys_width=3,
-    kp_width=60,
+    barycentric_correction=True,
+    normalize=True,
 ):
     phi = (datetime - planet.time_of_transit) / planet.period
     phi = phi.to_value(1)
@@ -333,20 +308,22 @@ def calculate_cohen_d_for_dataset(
     # it is circular anyways
     phi[phi < 0.5] += 1
 
-    rv_bary = -star.coordinates.radial_velocity_correction(
-        obstime=datetime, location=telescope
-    ).to_value("km/s")
     vsys = star.radial_velocity.to_value("km/s")
     kp = Orbit(star, planet).radial_velocity_semiamplitude_planet().to_value("km/s")
-    vp = vsys + kp * np.sin(2 * np.pi * phi) + rv_bary
-    vsys += np.mean(rv_bary)
+    vp = vsys + kp * np.sin(2 * np.pi * phi)
+    if barycentric_correction:
+        rv_bary = -star.coordinates.radial_velocity_correction(
+            obstime=datetime, location=telescope
+        ).to_value("km/s")
+        vp += rv_bary
+    else:
+        rv_bary = None
 
-    kp_expected = kp
     vsys_expected = vsys
 
     ingress = (-planet.transit_duration / 2 / planet.period).to_value(1) % 1
     egress = 1 + (planet.transit_duration / 2 / planet.period).to_value(1) % 1
-    in_transit = (phi >= ingress) | (phi <= egress)
+    in_transit = (phi >= ingress) & (phi <= egress)
     out_transit = ~in_transit
 
     rv_points = int(2 * rv_range / rv_step + 1)
@@ -372,149 +349,121 @@ def calculate_cohen_d_for_dataset(
     for i, vs in enumerate(tqdm(vsys)):
         for j, k in enumerate(tqdm(kp, leave=False)):
             vp_loc = vs + k * np.sin(2 * np.pi * phi)
+            if barycentric_correction:
+                vp_loc += rv_bary
             # shifted = [np.interp(vp[i], rv, data[i], left=np.nan, right=np.nan) for i in range(len(vp))]
             shifted = np.diag(interpolator(vp_loc))
             combined[j, i] = np.nansum(shifted[selection])
 
     # Normalize to the number of input spectra
     combined /= data.shape[0]
-    combined /= combined.std()
 
     # Normalize to median 0
     median = np.nanmedian(combined)
     combined -= median
 
+    if normalize:
+        mask = (vsys > vsys_expected + vsys_range[1] / 2) | (
+            vsys < vsys_expected - vsys_range[0] / 2
+        )
+        combined /= nanmad(combined[:, mask])
+
+    return kp, vsys, combined
+
+
+def find_peak(
+    combined,
+    kp,
+    vsys,
+    rv_step,
+    vsys_width=3,
+    kp_width=60,
+    fix_kp_vsys=False,
+    kp_expected=100,
+    vsys_expected=0,
+):
     # Find peak
     if fix_kp_vsys:
         kp_peak = np.digitize(kp_expected, kp)
         vsys_peak = np.digitize(vsys_expected, vsys)
+
         vsys_width = int(vsys_width / rv_step)  # +-3 km/s
         kp_width = int(kp_width / rv_step)  # +-60 km/s
-        kp_popt = vsys_popt = None
-        vsys_width_int = int(np.ceil(vsys_width)) // 4
-        lower = max(vsys_peak - vsys_width_int, 0)
-        upper = min(vsys_peak + vsys_width_int + 1, combined.shape[1])
-        mean_kp = np.nanmean(combined[:, lower:upper], axis=1)
-        kp_width_int = int(np.ceil(kp_width))
-        lower = max(kp_peak - kp_width_int, 0)
-        upper = min(kp_peak + kp_width_int + 1, combined.shape[0])
-        mean_vsys = np.nanmean(combined[lower:upper, :], axis=0)
+
+        # (a, mu, sigma, floor)
+        A = combined[kp_peak, vsys_peak]
+        kp_popt = [A, kp_peak, kp_width, 0]
+        vsys_popt = [A, vsys_peak, vsys_width, 0]
     else:
-        kp_peak = combined.shape[0] // 2
+        idx = np.unravel_index(np.argmax(combined), combined.shape)
+        kp_peak, vsys_peak = idx
+        mean_kp = combined[:, vsys_peak]
+        mean_vsys = combined[kp_peak, :]
+
         kp_width = int(kp_width / rv_step)
+        vsys_width = int(vsys_width / rv_step)
 
-        for i in range(3):
-            # Determine the peak position in vsys and kp
-            kp_width_int = int(np.ceil(kp_width))
-            lower = max(kp_peak - kp_width_int, 0)
-            upper = min(kp_peak + kp_width_int + 1, combined.shape[0])
-            mean_vsys = np.nanmean(combined[lower:upper, :], axis=0)
-            vsys_peak = np.argmax(mean_vsys)
+        try:
+            _, vsys_popt = gaussfit(
+                vsys,
+                mean_vsys,
+                p0=[
+                    mean_vsys[vsys_peak] - np.min(mean_vsys),
+                    vsys[vsys_peak],
+                    1,
+                    np.min(mean_vsys),
+                ],
+            )
+            vsys_width = vsys_popt[2] / rv_step
+            vsys_width = int(np.ceil(vsys_width))
+        except RuntimeError:
+            A = combined[kp_peak, vsys_peak]
+            vsys_popt = [A, vsys_peak, vsys_width, 0]
 
-            # And then fit gaussians to determine the width
-            try:
-                _, vsys_popt = gaussfit(
-                    vsys,
-                    mean_vsys,
-                    p0=[
-                        mean_vsys[vsys_peak] - np.min(mean_vsys),
-                        vsys[vsys_peak],
-                        1,
-                        np.min(mean_vsys),
-                    ],
-                )
-                vsys_width = vsys_popt[2] / rv_step
-            except RuntimeError:
-                vsys_width = int(vsys_width / rv_step)
-                vsys_popt = None
-                break
+        try:
+            _, kp_popt = gaussfit(
+                kp,
+                mean_kp,
+                p0=[
+                    mean_kp[kp_peak] - np.min(mean_kp),
+                    kp[kp_peak],
+                    1,
+                    np.min(mean_kp),
+                ],
+            )
+            kp_width = kp_popt[2] / rv_step
+            kp_width = int(np.ceil(kp_width))
+        except RuntimeError:
+            A = combined[kp_peak, vsys_peak]
+            kp_popt = [A, kp_peak, kp_width, 0]
 
-            # Do the same for the planet velocity
-            vsys_width_int = int(np.ceil(vsys_width)) // 4
-            lower = max(vsys_peak - vsys_width_int, 0)
-            upper = min(vsys_peak + vsys_width_int + 1, combined.shape[1])
-            mean_kp = np.nanmean(combined[:, lower:upper], axis=1)
-            kp_peak = np.argmax(mean_kp)
+    return kp_popt, vsys_popt
 
-            try:
-                _, kp_popt = gaussfit(
-                    kp,
-                    mean_kp,
-                    p0=[
-                        mean_kp[kp_peak] - np.min(mean_kp),
-                        kp[kp_peak],
-                        1,
-                        np.min(mean_kp),
-                    ],
-                )
-                kp_width = kp_popt[2] / rv_step
-            except RuntimeError:
-                kp_width = int(kp_width / rv_step)
-                kp_popt = None
-                break
 
-        vsys_width = int(np.ceil(vsys_width))
-        kp_width = int(np.ceil(kp_width))
+def calculate_cohen_d(combined, kp_popt, vsys_popt):
 
-    # Have to check that this makes sense
-    # vsys_width = int(2 / rv_step)  # +-2 km/s
-    # kp_width = int(20 / rv_step)  # +-10 km/s
+    kp_peak, kp_width = kp_popt[1:3]
+    vsys_peak, vsys_width = vsys_popt[1:3]
 
     mask = np.full(combined.shape, False)
     kp_low = max(0, kp_peak - kp_width)
-    kp_upp = min(kp.size, kp_peak + kp_width)
+    kp_upp = min(combined.shape[0], kp_peak + kp_width)
     vsys_low = max(0, vsys_peak - vsys_width)
-    vsys_upp = min(vsys.size, vsys_peak + vsys_width)
+    vsys_upp = min(combined.shape[1], vsys_peak + vsys_width)
     mask[kp_low:kp_upp, vsys_low:vsys_upp] = True
 
     in_trail = combined[mask].ravel()
-
-    # kp_offset = kp_width * 2
-    # mask = np.full(combined.shape, False)
-    # kp_low = max(0, kp_peak - kp_width + kp_offset)
-    # kp_upp = min(kp.size, kp_peak + kp_width + kp_offset)
-    # vsys_low = max(0, vsys_peak - vsys_width)
-    # vsys_upp = min(vsys.size, vsys_peak + vsys_width)
-    # mask[kp_low:kp_upp, vsys_low:vsys_upp] = True
-
     out_trail = combined[~mask].ravel()
 
-    hrange = (np.min(combined), np.max(combined))
-    bins = 50
-    _, hbins = np.histogram(in_trail, bins=bins, range=hrange, density=True)
+    # hrange = (np.min(combined), np.max(combined))
+    # bins = 50
+    # _, hbins = np.histogram(in_trail, bins=bins, range=hrange, density=True)
 
     # Calculate the cohen d between the 2 distributions
     d = cohen_d(in_trail, out_trail)
     t = welch_t(in_trail, out_trail)
 
-    res = {
-        "d": d,
-        "t": t,
-        "combined": combined,
-        "vsys": vsys,
-        "vsys_peak": vsys_peak,
-        "vsys_width": vsys_width,
-        "vsys_popt": vsys_popt,
-        "vsys_mean": mean_vsys,
-        "vsys_expected": vsys_expected,
-        "kp": kp,
-        "kp_peak": kp_peak,
-        "kp_width": kp_width,
-        "kp_popt": kp_popt,
-        "kp_mean": mean_kp,
-        "kp_expected": kp_expected,
-        "in_trail": in_trail,
-        "out_of_trail": out_trail,
-        "bins": hbins,
-        "phi": phi,
-        "in_transit": in_transit,
-        "ingress": ingress,
-        "egress": egress,
-        "rv_points": rv_points,
-        "vp": vp,
-    }
-
-    return res
+    return d, t
 
 
 def load_data(data_dir, load=False):
